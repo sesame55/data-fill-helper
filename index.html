@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- 不讓搜尋引擎收錄 -->
+  <meta name="robots" content="noindex, nofollow">
+  <!-- 安全政策：只能連線到本站自己（connect-src 'self'，供文字辨識模型載入），禁止傳到任何外部伺服器。
+       wasm-unsafe-eval 讓本站 lib/tesseract 的辨識引擎（WebAssembly）可以執行。 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; form-action 'none'; base-uri 'none'">
+  <title>資料填報小幫手</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- ===== 登入畫面 ===== -->
+  <section id="login-view" class="login-view" hidden>
+    <form id="login-form" class="login-card" autocomplete="off">
+      <h1>資料填報小幫手</h1>
+      <p class="muted">內部使用・請輸入通行密碼</p>
+      <label for="password">密碼</label>
+      <input id="password" type="password" required autofocus>
+      <button type="submit" class="btn-primary">登入</button>
+      <p id="login-error" class="error" hidden></p>
+      <p class="note">🔒 所有檔案只在您的電腦瀏覽器中處理，不會上傳到網路。關閉分頁即清空。</p>
+    </form>
+  </section>
+
+  <!-- ===== 主畫面（登入後顯示） ===== -->
+  <div id="app-view" class="app-view" hidden>
+    <header class="topbar">
+      <div class="brand">資料填報小幫手</div>
+      <nav id="tabs" class="tabs" role="tablist">
+        <button class="tab active" data-tab="home" role="tab">首頁</button>
+        <button class="tab" data-tab="teaching-clinic" role="tab">教學住診</button>
+        <button class="tab" data-tab="outpatient" role="tab">教學門診</button>
+        <button class="tab" data-tab="tutor" role="tab">導生座談</button>
+      </nav>
+      <div class="topbar-right">
+        <span id="idle-timer" class="muted small"></span>
+        <button id="clear-btn" class="btn-ghost" title="清除目前所有已匯入資料">清空資料</button>
+        <button id="logout-btn" class="btn-ghost">登出</button>
+      </div>
+    </header>
+
+    <main>
+      <!-- 首頁 -->
+      <section id="tab-home" class="tab-panel active">
+        <h2>首頁</h2>
+        <p class="muted">請選擇要處理的項目。每個分頁的資料分開計算，互不影響。</p>
+        <div class="card-grid">
+          <button class="feature-card" data-goto="teaching-clinic">
+            <span class="card-tag">可使用</span>
+            <h3>教學住診</h3>
+            <p>以各單位<b>補助費申請單（PDF）</b>為基準，比對 rawdata；每位老師每週 1,000 元。</p>
+          </button>
+          <button class="feature-card" data-goto="outpatient">
+            <span class="card-tag">可使用</span>
+            <h3>教學門診</h3>
+            <p>以各單位<b>補助費申請單（PDF／Word）</b>為基準，比對 rawdata；每位學員 500 元、每日上限 1,500 元。</p>
+          </button>
+          <button class="feature-card" data-goto="tutor">
+            <span class="card-tag">可使用</span>
+            <h3>導生座談</h3>
+            <p>rawdata ＋ 手寫簽到簿：產生每月檢核狀態（V／院內）、餐費補助結報與重複申請清單。</p>
+          </button>
+          <div class="feature-card disabled">
+            <span class="card-tag gray">規劃中</span>
+            <h3>其他分頁</h3>
+            <p>之後依需求新增。</p>
+          </div>
+        </div>
+
+        <div class="info-box">
+          <h4>🔒 資料安全說明</h4>
+          <ul>
+            <li>檔案只在本機瀏覽器記憶體中處理，<strong>不會傳送到任何伺服器</strong>（網頁已設定禁止對外連線）。</li>
+            <li>不使用瀏覽器儲存空間保存資料；<strong>關閉或重新整理分頁即清空</strong>。</li>
+            <li id="idle-note">閒置 <span id="idle-minutes"></span> 分鐘自動登出並清除資料。</li>
+          </ul>
+        </div>
+      </section>
+
+      <!-- 教學門住診 -->
+      <section id="tab-teaching-clinic" class="tab-panel">
+        <h2>教學住診</h2>
+
+        <!-- ===== 教學住診 ===== -->
+        <div id="ip-root">
+          <div class="step">
+            <h3>① 匯入檔案</h3>
+            <p class="muted small">可一次拖入全部檔案，系統會自動分辨：
+              <b>範本</b>（要填的名冊 .xlsx）、<b>rawdata</b>（含「課程rawdata」工作表的 .xlsx）、<b>申請單／紀錄表</b>（各單位教學住診補助費申請單、手寫住診教學紀錄表的掃描 PDF，可多個）。全部自動辨識，辨識不出的在下載的名冊以<b class="text-red">紅字</b>標示。<br><b>計費以申請單為基準</b>：只有申請單上列的才計費，rawdata 用來比對與取得卡號。</p>
+            <label id="ip-dropzone" class="dropzone">
+              <input id="ip-file" type="file" multiple accept=".xlsx,.pdf" hidden>
+              <strong>拖曳檔案到這裡</strong>，或點擊選擇檔案
+              <span class="muted small">.xlsx ・ .pdf</span>
+            </label>
+            <div id="ip-status" class="status-list"></div>
+            <div class="settings">
+              <label>計週方式
+                <select id="ip-week-start">
+                  <option value="1">週一 ～ 週日</option>
+                  <option value="0">週日 ～ 週六</option>
+                </select>
+              </label>
+              <span class="muted small">每週 1,000 元；同一週教學多天仍只算 1,000 元。</span>
+            </div>
+          </div>
+
+          <div id="ip-app-step" class="step" hidden>
+            <h3>② 申請單（PDF）辨識與比對</h3>
+            <p class="muted small">自動轉正、辨識每一列的教學日期、主治醫師、學員，並與 rawdata 比對。無法辨識的列直接計入，在下載的名冊中以<b class="text-red">紅字</b>（卡號或金額空白）標示，請下載後人工核對。</p>
+            <div id="ip-app"></div>
+          </div>
+
+          <div id="ip-pdf-step" class="step" hidden>
+            <h3>②-2 手寫紀錄確認</h3>
+            <p class="muted small">請對照影像輸入「指導教師」與「教學日」。輸入姓名後會自動從 rawdata 帶出卡號與單位；找不到時請手動填卡號。</p>
+            <div id="ip-pdf-list" class="pdf-list"></div>
+          </div>
+
+          <div id="ip-result-step" class="step" hidden>
+            <h3>③ 計算結果</h3>
+            <div id="ip-stats" class="stats"></div>
+            <div id="ip-warnings"></div>
+            <div class="result-toolbar">
+              <input id="ip-filter" type="search" placeholder="搜尋單位、卡號、姓名">
+              <button id="ip-raw-download" class="btn-ghost">下載比對後的 rawdata（綠＝與申請單對到）</button>
+              <button id="ip-download" class="btn-primary inline">下載填好的名冊 (.xlsx)</button>
+            </div>
+            <div class="table-wrap">
+              <table class="file-table">
+                <thead><tr><th>年</th><th>月</th><th>單位</th><th>卡號</th><th>姓名</th><th>金額</th><th>備註</th><th>教學日</th></tr></thead>
+                <tbody id="ip-result"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 教學門診 -->
+      <section id="tab-outpatient" class="tab-panel">
+        <h2>教學門診</h2>
+
+        <!-- ===== 教學門診 ===== -->
+        <div id="op-root">
+          <div class="step">
+            <h3>① 匯入檔案</h3>
+            <p class="muted small">可一次拖入全部檔案：<b>範本</b>（教學門診名冊 .xlsx）、<b>rawdata</b>（含「課程rawdata」工作表的 .xlsx）、
+              <b>申請單</b>（各單位的教學門診補助費申請單：掃描 PDF 或 Word .doc，可多個）。<br><b>計費以申請單為基準</b>：只有申請單上列的才計費，rawdata 用來比對與取得卡號。</p>
+            <label id="op-dropzone" class="dropzone">
+              <input id="op-file" type="file" multiple accept=".xlsx,.doc,.pdf" hidden>
+              <strong>拖曳檔案到這裡</strong>，或點擊選擇檔案
+              <span class="muted small">.xlsx ・ .pdf ・ .doc</span>
+            </label>
+            <div id="op-status" class="status-list"></div>
+            <div class="settings">
+              <label class="check-inline"><input id="op-include-app" type="checkbox" checked>
+                申請單有、系統沒有（或老師未評核）的學員也計入（紅字標示）</label>
+              <span class="muted small">每位學員 500 元，每位老師每日上限 3 位（1,500 元）。</span>
+            </div>
+          </div>
+
+          <div id="op-app-step" class="step" hidden>
+            <h3>② 申請單（PDF）辨識與比對</h3>
+            <p class="muted small">自動轉正、辨識每一列的日期、主治醫師、學員（含 Word 版一列多位學員、民國日期），並與 rawdata 比對。無法辨識的列直接計入，在下載的名冊中以<b class="text-red">紅字</b>（卡號或金額空白）標示，請下載後人工核對。</p>
+            <div id="op-app"></div>
+          </div>
+
+          <div id="op-cmp-step" class="step" hidden>
+            <h3>②-2 Word 申請單比對</h3>
+            <p class="muted small">比對申請單上的老師與日期。「僅申請單」＝系統沒有已評核紀錄的學員；「僅系統」＝系統有、申請單沒列的學員。</p>
+            <div id="op-cmp-summary" class="stats"></div>
+            <div class="result-toolbar">
+              <label class="check-inline"><input id="op-cmp-diff-only" type="checkbox" checked>只顯示有差異的</label>
+            </div>
+            <div class="table-wrap">
+              <table class="file-table">
+                <thead><tr><th>申請單位</th><th>主治醫師</th><th>卡號</th><th>日期</th><th>申請</th><th>系統</th><th>僅申請單</th><th>僅系統</th><th>狀態</th></tr></thead>
+                <tbody id="op-cmp"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div id="op-result-step" class="step" hidden>
+            <h3>③ 計算結果</h3>
+            <div id="op-stats" class="stats"></div>
+            <div id="op-warnings"></div>
+            <div class="result-toolbar">
+              <input id="op-filter" type="search" placeholder="搜尋單位、卡號、姓名">
+              <button id="op-raw-download" class="btn-ghost">下載比對後的 rawdata（綠＝與申請單對到）</button>
+              <button id="op-download" class="btn-primary inline">下載填好的名冊 (.xlsx)</button>
+            </div>
+            <div class="table-wrap">
+              <table class="file-table">
+                <thead><tr><th>年</th><th>月</th><th>單位</th><th>卡號</th><th>姓名</th><th>金額</th><th>備註</th></tr></thead>
+                <tbody id="op-result"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+
+      <!-- 導生座談 -->
+      <section id="tab-tutor" class="tab-panel">
+        <h2>導生座談</h2>
+        <div class="subtabs">
+          <button class="subtab active" data-sub="rate">導談完成率（rawdata）</button>
+          <button class="subtab" data-sub="meal">簽到簿餐費（PDF）</button>
+        </div>
+
+        <!-- ===== 導談完成率：rawdata 填入原始統計檔 ===== -->
+        <div data-subpanel="rate">
+          <div class="step">
+            <h3>① 匯入檔案</h3>
+            <p class="muted small">拖入 <b>3 個 rawdata</b>（PGY／住院醫師／實習生 導生會談細項 .xlsx）與 <b>原始的導談完成率統計</b> .xlsx。
+              程式會在統計檔各工作表（R檢核／PGY／C）的當月欄位填入「V」與座談日期，<b>只填空白格、不覆寫</b>，其餘內容與格式完全不動。</p>
+            <label id="tf-dropzone" class="dropzone">
+              <input id="tf-file" type="file" multiple accept=".xlsx" hidden>
+              <strong>拖曳檔案到這裡</strong>，或點擊選擇檔案
+              <span class="muted small">.xlsx</span>
+            </label>
+            <div id="tf-status" class="status-list"></div>
+            <div class="settings"><label>只處理某月 <input id="tf-month" type="month"></label>
+              <span class="muted small">留空＝依每筆的<b>座談日期</b>填入對應月份（全部月份）</span></div>
+          </div>
+          <div id="tf-result-step" class="step" hidden>
+            <h3>② 填入結果</h3>
+            <div id="tf-stats" class="stats"></div>
+            <div id="tf-warnings"></div>
+            <div class="table-wrap"><table class="file-table">
+              <thead><tr><th>月份</th><th>工作表</th><th>月份欄</th><th>填入</th><th>已有資料</th><th>找不到欄位</th></tr></thead>
+              <tbody id="tf-sheets"></tbody>
+            </table></div>
+            <div class="result-toolbar">
+              <span class="muted small">下載的是原始統計檔＋本月填入的內容。</span>
+              <button id="tf-download" class="btn-primary inline">下載填好的導談完成率 (.xlsx)</button>
+            </div>
+            <div id="tf-lists"></div>
+          </div>
+        </div>
+
+        <!-- ===== 簽到簿餐費：PDF ===== -->
+        <div data-subpanel="meal" hidden>
+        <div class="step">
+          <h3>① 匯入檔案</h3>
+          <p class="muted small">可一次拖入全部檔案：<b>rawdata</b>（PGY／住院醫師／實習生 導生會談細項 .xlsx）、
+            <b>導談完成率統計</b>（當作學員名冊 .xlsx）、<b>簽到簿</b>（.pdf，檔名含 PGY／R／實習生／臨培／青果森）。</p>
+          <label id="tu-dropzone" class="dropzone">
+            <input id="tu-file" type="file" multiple accept=".xlsx,.pdf" hidden>
+            <strong>拖曳檔案到這裡</strong>，或點擊選擇檔案
+            <span class="muted small">.xlsx ・ .pdf</span>
+          </label>
+          <div id="tu-status" class="status-list"></div>
+          <div class="settings">
+            <label>月份 <input id="tu-month" type="month"></label>
+            <span class="muted small">V＝系統有紀錄；院內＝有簽到（美德耐＋青果森）；院外請自行填寫。</span>
+          </div>
+        </div>
+
+        <div id="tu-sign-step" class="step" hidden>
+          <h3>② 簽到簿自動辨識</h3>
+          <div class="info-box small">程式會自動找出有手寫的列，以 PaddleOCR 手寫辨識（本機執行）讀取<b>日期、姓名、卡號、GSM</b>，再與名冊、rawdata 綜合比對（明顯領先者才採用；日期以系統座談日期補足）。
+            辨識不出的列自動列入「無法辨識」，在下載的結果中以<b class="text-red">紅字</b>標示，請人工審核。
+            <div id="tu-ocr-status" class="muted"></div></div>
+          <div id="tu-pages"></div>
+        </div>
+
+        <div id="tu-result-step" class="step" hidden>
+          <h3>③ 結果</h3>
+          <div id="tu-stats" class="stats"></div>
+          <div id="tu-warnings"></div>
+          <div class="result-grid">
+            <div>
+              <h4>餐費補助</h4>
+              <div class="table-wrap"><table class="file-table">
+                <thead><tr><th>職類</th><th>原本人數</th><th>修正人數</th><th>單價</th><th>原本金額</th><th>修正金額</th></tr></thead>
+                <tbody id="tu-meal"></tbody>
+              </table></div>
+            </div>
+            <div>
+              <h4>結報信件 <button id="tu-copy" class="btn-ghost small">複製</button></h4>
+              <textarea id="tu-message" class="message-box" readonly rows="12"></textarea>
+            </div>
+          </div>
+          <div id="tu-lists"></div>
+          <h4>檢核結果（與下載檔相同）</h4>
+          <div class="result-toolbar">
+            <input id="tu-filter" type="search" placeholder="搜尋類別、單位、卡號、姓名、導師">
+            <label class="check-inline"><input id="tu-only-status" type="checkbox" checked>只顯示本月有狀態的</label>
+            <button id="tu-download" class="btn-ghost">下載結果明細 (.xlsx)</button>
+            <button id="tu-fill-download" class="btn-primary inline">下載填好「院內」的導談完成率 (.xlsx)</button>
+          </div>
+          <p class="muted small">「填好院內」：在匯入的導談完成率統計檔（可用①下載的檔案）當月欄位寫入「院內」；空白或原為 V 才寫，
+            簽到但系統無紀錄者紅底白字；院外／外訓等手動內容不覆寫。</p>
+          <div id="tu-fill-report"></div>
+          <div class="table-wrap">
+            <table class="file-table">
+              <thead><tr><th>類別</th><th>名冊工作表</th><th>名冊列號</th><th>單位</th><th>卡號</th><th>姓名</th><th>導師</th><th>狀態</th><th>座談日期</th><th>系統筆數</th><th>簽到來源</th><th>備註</th></tr></thead>
+              <tbody id="tu-result"></tbody>
+            </table>
+          </div>
+        </div>
+        </div><!-- /簽到簿餐費 -->
+      </section>
+
+      <!-- 影像放大檢視 -->
+      <div id="img-viewer" class="img-viewer" hidden><img alt="手寫紀錄"></div>
+    </main>
+  </div>
+
+  <!-- 函式庫皆放在本站 lib/，不連外部網路 -->
+  <script src="lib/xlsx.full.min.js"></script>
+  <script src="lib/exceljs.min.js"></script>
+  <script src="lib/pdf.min.js"></script>
+  <script src="js/core/inpatient-calc.js"></script>
+  <script src="js/core/inpatient-fill.js"></script>
+  <script src="js/core/doc-reader.js"></script>
+  <script src="js/core/outpatient-calc.js"></script>
+  <script src="js/core/tutor-calc.js"></script>
+  <script src="lib/jszip.min.js"></script>
+  <script src="js/core/tutor-fill.js"></script>
+  <script src="js/core/sheet-detect.js"></script>
+  <script src="js/core/app-form.js"></script>
+  <script src="lib/tesseract/tesseract.min.js"></script>
+  <script src="lib/onnx/ort.min.js"></script>
+  <script src="js/core/paddle-rec.js"></script>
+  <script src="js/auth.js"></script>
+  <script src="js/app.js"></script>
+  <script src="js/tabs/app-pdf.js"></script>
+  <script src="js/tabs/teaching-clinic.js"></script>
+  <script src="js/tabs/outpatient.js"></script>
+  <script src="js/tabs/tutor.js"></script>
+  <script src="js/tabs/tutor-fill.js"></script>
+</body>
+</html>

@@ -1,0 +1,277 @@
+/*
+ * 補助費申請單（PDF 掃描）：辨識＋比對（教學住診、教學門診共用）
+ * AppPdf.create({ root, getRawRows, getYm, onChange })
+ * - 自動轉正、偵測表格、文字辨識（lib/tesseract，本機執行不外傳）、與 rawdata 比對。
+ * - 辨識方式（實測最準）：先清除表格水平線（文字常壓在格線上），再「逐格」辨識：
+ *     日期格用數字模型、姓名格用中文模型（單行）。
+ * - 兩種版面：系統印出版（日期｜主治醫師｜學員…）、Word 版（主治醫師｜學員（多位）｜看診日期 民國）。
+ * - 畫面只顯示進度與統計；無法辨識的列直接計入，於下載的名冊中紅字／空白，供人工核對。
+ */
+(() => {
+  const A = window.AppForm;
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'lib/pdf.worker.min.js';
+
+  // ---------- 文字辨識工作者（兩個分頁共用；兩組平行處理） ----------
+  let pool = null;
+  async function getPool(onStatus) {
+    if (pool) return pool;
+    const opt = { workerPath: 'lib/tesseract/worker.min.js', corePath: 'lib/tesseract', langPath: 'lib/tesseract/lang', gzip: true, workerBlobURL: false, cacheMethod: 'none' };
+    onStatus('載入文字辨識模型（第一次約需數秒）…');
+    const make = async (lang, params) => { const w = await Tesseract.createWorker(lang, 1, opt); await w.setParameters(params); return w; };
+    pool = await Promise.all([0, 1].map(async () => ({
+      num: await make('eng', { tessedit_pageseg_mode: '7', tessedit_char_whitelist: '0123456789-./' }),
+      chi7: await make('chi_tra', { tessedit_pageseg_mode: '7' }),
+      chi6: await make('chi_tra', { tessedit_pageseg_mode: '6' }),
+    })));
+    return pool;
+  }
+
+  const rect = (x0, y0, x1, y1, m = 0) => ({ left: Math.round(x0 + m), top: Math.round(y0 + m), width: Math.max(4, Math.round(x1 - x0 - 2 * m)), height: Math.max(4, Math.round(y1 - y0 - 2 * m)) });
+  const ROC_RE = /(1\d{2})\D{1,2}(\d{1,2})\D{1,2}(\d{1,2})/;
+  const han = (t) => String(t || '').normalize('NFKC').replace(/[^\p{Script=Han}-]/gu, '');
+
+  /** 辨識前清除水平線（底線、格線）：長度超過 minLen 的連續暗點列塗白 */
+  function eraseHLines(ctx, x0, y0, x1, y1, minLen) {
+    const w = x1 - x0; const h = y1 - y0;
+    const img = ctx.getImageData(x0, y0, w, h);
+    const d = img.data;
+    const dark = (i) => 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2] < 170;
+    for (let y = 0; y < h; y += 1) {
+      let run = 0;
+      for (let x = 0; x <= w; x += 1) {
+        if (x < w && dark((y * w + x) * 4)) { run += 1; continue; }
+        if (run >= minLen) for (let k = x - run; k < x; k += 1) { const i = (y * w + k) * 4; d[i] = 255; d[i + 1] = 255; d[i + 2] = 255; }
+        run = 0;
+      }
+    }
+    ctx.putImageData(img, x0, y0);
+  }
+
+  function inkRatio(ctx, r) {
+    const d = ctx.getImageData(r.left, r.top, r.width, r.height).data;
+    let n = 0;
+    for (let p = 0; p < d.length; p += 4) if (0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2] < 150) n += 1;
+    return n / (d.length / 4);
+  }
+
+  async function renderPage(page, extraRotation, dpi) {
+    const viewport = page.getViewport({ scale: dpi / 72, rotation: (page.rotate + extraRotation) % 360 });
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width; canvas.height = viewport.height;
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    return canvas;
+  }
+  const findGrid = (ctx, w, h) => { const img = ctx.getImageData(0, 0, w, h); return SheetDetect.detectGrid(img) || SheetDetect.detectGrid(img, 0.15); };
+
+  /** 自動轉正：試 0°／90°／270°，取表格前幾列中文字＋數字最多的方向；都沒有表格回傳 null */
+  async function chooseRotation(P, page) {
+    let best = null; let withGrid = 0;
+    for (const rot of [0, 90, 270]) {
+      const cv = await renderPage(page, rot, 150);
+      const grid = findGrid(cv.getContext('2d'), cv.width, cv.height);
+      if (grid && grid.rows.length >= 2) {
+        withGrid += 1;
+        const r0 = grid.rows[Math.min(1, grid.rows.length - 1)]; const r1 = grid.rows[Math.min(grid.rows.length - 1, 4)];
+        const t = (await P.chi6.recognize(cv, { rectangle: rect(grid.cols[0], r0.top, grid.cols[grid.cols.length - 1], r1.bottom) })).data.text.normalize('NFKC');
+        const score = (t.match(/\p{Script=Han}/gu) || []).length + (t.match(/\d/g) || []).length * 0.5;
+        if (!best || score > best.score) best = { rot, score };
+      }
+      cv.width = 0;
+      if (rot === 0 && best && best.score >= 20) break;   // 正向就很清楚，不必再試
+    }
+    return best && (best.score >= 6 || withGrid === 1) ? best.rot : null;
+  }
+
+  function create({ root, getRawRows, getYm, onChange }) {
+    let pages = [];   // { key, file, page, unit, note, rot, rows: [...] }
+    let seq = 0;
+    let busy = false;
+    const queue = [];
+    let matched = [];
+
+    root.innerHTML = '<div class="ap-status muted small"></div><div class="stats ap-stats"></div><div class="ap-notes small muted"></div>';
+    const $ = (s) => root.querySelector(s);
+    const setStatus = (m) => { $('.ap-status').textContent = m; };
+
+    async function addPdf(file) {
+      const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false }).promise;
+      for (let p = 1; p <= pdf.numPages; p += 1) {
+        const pg = { key: ++seq, file: file.name, page: p, unit: '', note: '', rows: [] };
+        pages.push(pg);
+        queue.push({ pg, page: await pdf.getPage(p) });
+      }
+      render();
+      run();
+    }
+
+    async function run() {
+      if (busy) return;
+      busy = true;
+      try {
+        const workers = await getPool(setStatus);
+        let done = pages.filter((p) => p.done).length;
+        await Promise.all(workers.map(async (P) => {
+          while (queue.length) {
+            const job = queue.shift();
+            setStatus(`辨識申請單：${done + 1}/${pages.length} 頁…`);
+            // 低解析度判斷不出方向時（細格線在 150 dpi 可能偵測不到），以 300 dpi 正向再試
+            const rot = await chooseRotation(P, job.page);
+            job.pg.rot = rot ?? 0;
+            const canvas = await renderPage(job.page, job.pg.rot, 300);
+            await extractPage(P, job.pg, canvas);
+            canvas.width = 0;
+            if (rot === null && !job.pg.rows.length && !job.pg.unreadable) job.pg.note = '沒有偵測到申請資料（可能是排班表或空白頁），略過';
+            job.pg.done = true;
+            done += 1;
+            rematch();
+          }
+        }));
+        busy = false;
+        setStatus(`辨識完成：${pages.length} 頁、${pages.reduce((a, p) => a + p.rows.length, 0)} 列。`);
+        rematch();
+      } catch (err) {
+        console.error(err);
+        setStatus(`文字辨識失敗：${err.message}`);
+      } finally {
+        busy = false;
+      }
+    }
+
+    /** 住診教學紀錄表（手寫）：一頁一筆，讀「指導教師」與「教學起迄時間」的日期 */
+    async function extractRecordForm(P, pg, canvas, text) {
+      const t = text.normalize('NFKC').replace(/\s/g, '');
+      pg.format = '紀錄表';
+      const teacher = ((t.match(/指導教師[:：]?([\p{Script=Han}]{2,4}?)醫師/u) || t.match(/指導教師[:：]?([\p{Script=Han}]{2,4})/u) || [])[1] || '');
+      const unit = ((t.match(/科別[:：]?([\p{Script=Han}]{2,8}?)指導/u) || [])[1] || '');
+      const d = t.match(/(\d{2,3})年(\d{1,2})月(\d{1,2})日/);
+      const dateText = d ? `${Number(d[1]) + 1911}-${d[2]}-${d[3]}` : '';
+      if (unit) pg.unit = unit;
+      if (teacher.length >= 2 || dateText) {
+        pg.rows.push({ id: ++seq, ocrText: `${dateText} ${teacher}`, ocrDate: dateText,
+          date: A.fixDate(dateText, getYm() || '2000-01'), teacher, student: '', include: true, card: '' });
+      } else pg.unreadable = (pg.unreadable || 0) + 1;
+    }
+
+    async function extractPage(P, pg, canvas) {
+      const ctx = canvas.getContext('2d');
+      // 標題判斷：「住診教學紀錄表」（手寫，一頁一筆）
+      const top = (await P.chi6.recognize(canvas, { rectangle: rect(0, 0, canvas.width, canvas.height * 0.3) })).data.text;
+      if (/紀錄表|記錄表/.test(top.replace(/\s/g, ''))) { await extractRecordForm(P, pg, canvas, top); return; }
+      const grid = findGrid(ctx, canvas.width, canvas.height);
+      if (!grid || grid.cols.length < 4) { pg.note = '沒有偵測到表格'; return; }
+      const c = grid.cols;
+      const head = grid.rows[0];
+      const data = grid.rows.slice(1);
+      // 單位：表格上方文字中的「單位:XXX」（排除「單位簽章」）
+      const headTop = Math.max(0, head.top - canvas.height * 0.2);
+      const headText = (await P.chi6.recognize(canvas, { rectangle: rect(0, headTop, canvas.width, head.top) })).data.text;
+      const units = [...headText.normalize('NFKC').replace(/\s/g, '').matchAll(/單位(?!簽章)[:：]?([\p{Script=Han}]{2,10}?)(?=單位|申請|主治|$)/gu)].map((m) => m[1]);
+      pg.unit = units[units.length - 1] || '';
+
+      // 清除水平線（文字常壓在格線／底線上）
+      const xEnd = c[c.length - 1];
+      eraseHLines(ctx, c[0], Math.max(0, head.top - 6), xEnd, Math.min(canvas.height, data[data.length - 1].bottom + 6), Math.round((xEnd - c[0]) * 0.06));
+      const cell = (k, r, w) => w.recognize(canvas, { rectangle: rect(c[k] + 8, r.top + 4, c[k + 1] - 8, Math.min(canvas.height, r.bottom + 4)) }).then((x) => x.data.text);
+      // 版面：表頭第一格是「主治醫師…」→ Word 版；否則系統印出版
+      const h0 = han(await cell(0, head, P.chi7));
+      const word = /主治|醫師/.test(h0);
+      pg.format = word ? 'Word 版' : '系統版';
+
+      for (const r of data) {
+        if (inkRatio(ctx, rect(c[0], r.top, c[Math.min(3, c.length - 1)], r.bottom, 8)) < 0.004) continue;   // 空白列
+        let dateText; let teacher; let students;
+        if (word) {
+          const [t, s, d] = await Promise.all([cell(0, r, P.chi7), cell(1, r, P.chi6), cell(2, r, P.num)]);
+          teacher = han(t);
+          students = s.normalize('NFKC').split(/[、,，;；\s\n]+/).map(han).filter((x) => x.length >= 2);
+          const m = d.normalize('NFKC').match(ROC_RE);
+          dateText = m ? `${Number(m[1]) + 1911}-${m[2]}-${m[3]}` : d;
+        } else {
+          const [d, t, s] = await Promise.all([cell(0, r, P.num), cell(1, r, P.chi7), cell(2, r, P.chi7)]);
+          dateText = d; teacher = han(t); students = [han(s)];
+        }
+        teacher = teacher.replace(/醫師$/, '');
+        // 過濾雜訊列（排班表、手寫塗改、空白表單邊角）：需有 2 字以上的主治醫師，且有日期或學員
+        const hasDate = !!A.fixDate(dateText, getYm() || '2000-01');
+        if (teacher.length < 2 || !(hasDate || students.some((x) => x.length >= 2))) {
+          // 有墨跡但讀不出：可能是手寫或塗改 → 記錄，輸出紅字請人工核對
+          if (inkRatio(ctx, rect(c[0], r.top, c[Math.min(3, c.length - 1)], r.bottom, 8)) >= 0.02) pg.unreadable = (pg.unreadable || 0) + 1;
+          continue;
+        }
+        (students.length ? students : ['']).forEach((st) => pg.rows.push({
+          id: ++seq, ocrText: `${dateText} ${teacher} ${st}`.trim(), ocrDate: dateText,
+          date: A.fixDate(dateText, getYm() || '2000-01'), teacher, student: st, include: true, card: '',
+        }));
+      }
+    }
+
+    function rematch() {
+      const ym = getYm();
+      const raw = getRawRows();
+      const flat = pages.flatMap((p) => p.rows.map((r) => ({ ...r, unit: p.unit, page: p })));
+      flat.forEach((r) => { if (ym) r.date = A.fixDate(r.ocrDate, ym) || r.date; });
+      matched = ym && raw.length ? A.matchRows(flat, raw, ym) : flat.map((r) => ({ ...r, match: null, status: 'no-raw' }));
+      render();
+      onChange();
+    }
+
+    function render() {
+      const count = (s) => matched.filter((m) => m.status === s).length;
+      const undated = matched.filter((m) => !m.match && !m.date).length;
+      $('.ap-stats').innerHTML = matched.length ? `
+        <div class="stat"><span>申請單列數</span><b>${matched.length}</b></div>
+        <div class="stat"><span>與 rawdata 對到</span><b>${count('ok') + count('unsure') + count('not-done')}</b></div>
+        <div class="stat"><span>其中老師未評核</span><b>${count('not-done')}</b></div>
+        <div class="stat"><span>系統無紀錄（紅字計入）</span><b class="text-red">${count('no-system') - undated}</b></div>
+        <div class="stat"><span>日期無法辨識（紅字、金額空白）</span><b class="text-red">${undated}</b></div>
+        <div class="stat"><span>整列無法辨識（手寫等，紅字提醒）</span><b class="text-red">${pages.reduce((a, p) => a + (p.unreadable || 0), 0)}</b></div>` : '';
+      const notes = pages.filter((p) => p.note);
+      $('.ap-notes').innerHTML = notes.length ? `略過的頁：${notes.map((p) => `${esc(p.file)} 第 ${p.page} 頁`).join('、')}` : '';
+    }
+
+    const api = {
+      addPdf,
+      rematch,
+      hasData: () => pages.length > 0,
+      busy: () => busy || queue.length > 0,
+      matched: () => matched,
+      /** 有日期的申請單列 → 計費紀錄（系統無紀錄者 inSystem=false、紅字） */
+      records: () => A.toRecords(matched.filter((m) => m.match || m.date), getRawRows()),
+      /** 日期無法辨識的列（輸出為紅字、金額空白，供人工核對） */
+      undated: () => [
+        ...matched.filter((m) => !m.match && !m.date).map((m) => ({ unit: m.unit, teacher: m.teacher, student: m.student, where: `${m.page.file} p${m.page.page}`, text: m.ocrText })),
+        // 整列讀不出（手寫等）：每頁一列紅字提醒
+        ...pages.filter((p) => p.unreadable).map((p) => ({ unit: p.unit, teacher: `（${p.unreadable} 列無法辨識：${p.file} 第${p.page}頁，請人工核對）`, student: '', where: `${p.file} p${p.page}`, text: '' })),
+      ],
+      /** 與申請單對到的 rawdata 列號（綠色標示用） */
+      matchedRowNums: () => matched.filter((m) => m.match && m.match.rowNum).map((m) => m.match.rowNum),
+      reset() { pages = []; queue.length = 0; matched = []; render(); setStatus(''); },
+    };
+    instances.push(api);   // 測試／除錯用
+    return api;
+  }
+  const instances = [];
+
+  /**
+   * 下載比對後的 rawdata：與申請單對到的列，「評核者卡號」「評核者」兩格標綠色（只改顏色，其餘原樣）
+   * raw: { name, buffer }；rowNums: 原始 Excel 列號
+   */
+  async function downloadMatchedRaw(raw, rowNums) {
+    const wb = XLSX.read(raw.buffer, { sheets: ['課程rawdata'], sheetRows: 1 });
+    const header = XLSX.utils.sheet_to_json(wb.Sheets['課程rawdata'], { header: 1 })[0] || [];
+    const cols = ['評核者卡號', '評核者'].map((h) => header.indexOf(h) + 1).filter((c) => c > 0);
+    if (cols.length < 2) throw new Error('rawdata 找不到「評核者卡號」「評核者」欄位');
+    const writes = [...new Set(rowNums)].flatMap((row) => cols.map((col) => ({ sheet: '課程rawdata', row, col, kind: 'style', fill: 'FF92D050' })));
+    const out = await TutorFill.patchXlsx(raw.buffer, writes, { JSZip: window.JSZip, DOMParser, XMLSerializer });
+    const url = URL.createObjectURL(new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${raw.name.replace(/\.xlsx$/i, '')}_比對後.xlsx`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return writes.length / cols.length;
+  }
+
+  window.AppPdf = { create, downloadMatchedRaw, instances };
+})();

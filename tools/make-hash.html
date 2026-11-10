@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex, nofollow">
+  <title>產生密碼雜湊</title>
+  <link rel="stylesheet" href="../css/style.css">
+</head>
+<body>
+  <main>
+    <h2>產生新密碼的 SALT / HASH</h2>
+    <p class="muted">在本機開啟此頁，輸入新密碼後，把結果貼到 <code>js/auth.js</code> 的 SALT 與 HASH。密碼不會被送出。</p>
+    <input id="pw" type="password" placeholder="新密碼" style="padding:.5rem;width:260px">
+    <button id="go" class="btn-ghost">產生</button>
+    <pre id="out" style="background:#fff;padding:1rem;border:1px solid #dde3ea;border-radius:8px;white-space:pre-wrap"></pre>
+  </main>
+  <script src="../js/auth.js"></script>
+  <script src="make-hash.js"></script>
+</body>
+</html>
