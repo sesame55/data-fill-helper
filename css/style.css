@@ -629,3 +629,35 @@ select,
 .cand { font: inherit; font-size: .78rem; margin: .1rem .2rem 0 0; padding: .05rem .4rem; border: 1px solid var(--primary); color: var(--primary); background: var(--surface); border-radius: 99px; cursor: pointer; }
 .cand:hover { background: var(--accent-bg); }
 .file-table tr.total-row td { font-weight: 700; border-top: 2px solid var(--border); background: #f7f9fb; }
+
+/* ---- 全人電影 ---- */
+#fm-keywords {
+  width: 14rem;
+}
+#fm-result td,
+#fm-ballots td {
+  vertical-align: top;
+}
+.file-table td.film-text {
+  min-width: 18rem;
+  max-width: 32rem;
+}
+.film-text .clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.file-table td.film-raw {
+  max-width: 22rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.film-details {
+  margin-top: 1rem;
+}
+.film-details summary {
+  cursor: pointer;
+  font-weight: 600;
+}

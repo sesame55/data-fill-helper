@@ -37,6 +37,7 @@
         <button class="tab" data-tab="teaching-clinic" role="tab">教學住診</button>
         <button class="tab" data-tab="outpatient" role="tab">教學門診</button>
         <button class="tab" data-tab="tutor" role="tab">導生座談</button>
+        <button class="tab" data-tab="film" role="tab">全人電影</button>
       </nav>
       <div class="topbar-right">
         <span id="idle-timer" class="muted small"></span>
@@ -65,6 +66,11 @@
             <span class="card-tag">可使用</span>
             <h3>導生座談</h3>
             <p>rawdata ＋ 手寫簽到簿：產生每月檢核狀態（V／院內）、餐費補助結報與重複申請清單。</p>
+          </button>
+          <button class="feature-card" data-goto="film">
+            <span class="card-tag">可使用</span>
+            <h3>全人電影</h3>
+            <p>心得張貼 ＋ 票選資料：依規則重新計票（重複號碼只算一次），並標出作者部門含「聯合」「台南」者。</p>
           </button>
           <div class="feature-card disabled">
             <span class="card-tag gray">規劃中</span>
@@ -308,6 +314,57 @@
         </div><!-- /簽到簿餐費 -->
       </section>
 
+      <!-- 全人電影 -->
+      <section id="tab-film" class="tab-panel">
+        <h2>全人電影</h2>
+        <div class="step">
+          <h3>① 匯入檔案</h3>
+          <p class="muted small">拖入 <b>心得張貼</b>（工作表 101-200、201-300…；A 編號、B 心得、C 作者）與 <b>票選資料</b>（含「符合票選資格」工作表）兩個 .xlsx，系統自動分辨。</p>
+          <label id="fm-dropzone" class="dropzone">
+            <input id="fm-file" type="file" multiple accept=".xlsx" hidden>
+            <strong>拖曳檔案到這裡</strong>，或點擊選擇檔案
+            <span class="muted small">.xlsx</span>
+          </label>
+          <div id="fm-status" class="status-list"></div>
+          <div class="settings">
+            <label>標示部門含 <input id="fm-keywords" type="text" value="聯合、台南、臺南"></label>
+            <span class="muted small">多個關鍵字用頓號或逗號分隔。</span>
+          </div>
+          <div class="info-box small">
+            <b>計票規則</b>：直接解析每張票的<b>原始填答</b>（不用 Excel 已切好的三欄，那三欄常切錯）。
+            全形數字、頓號、全形逗號、換行、「1.」「2，」序號都能處理；連在一起的號碼（如 103106108）自動切開。
+            只算心得檔裡真的有心得的編號；<b>同一張票重複的號碼只算一次</b>；每張票最多 3 票。<br>
+            <b>部門對照</b>：以心得作者姓名對照「符合票選資格」的姓名取得部門，找不到再查其他名單工作表（如 Sheet1）。只用姓名比對，同名者請人工確認。
+          </div>
+        </div>
+
+        <div id="fm-result-step" class="step" hidden>
+          <h3>② 結果</h3>
+          <div id="fm-stats" class="stats"></div>
+          <div id="fm-warnings"></div>
+          <div class="result-toolbar">
+            <input id="fm-filter" type="search" placeholder="搜尋編號、作者、部門、心得內容">
+            <label class="check-inline"><input id="fm-only-flag" type="checkbox"><span id="fm-only-flag-label">只顯示標示者</span></label>
+            <button id="fm-download" class="btn-primary inline">下載心得票數 (.xlsx)</button>
+          </div>
+          <div class="table-wrap">
+            <table class="file-table">
+              <thead><tr><th>編號</th><th>心得</th><th>心得作者</th><th>票數</th><th>部門（對照02）</th><th id="fm-flag-head">標示</th><th>對照說明</th></tr></thead>
+              <tbody id="fm-result"></tbody>
+            </table>
+          </div>
+          <details class="film-details">
+            <summary>有特別處理的選票（<span id="fm-ballot-count">0</span> 張；完整明細在下載檔「計票明細」）</summary>
+            <div class="table-wrap">
+              <table class="file-table">
+                <thead><tr><th>原始列號</th><th>帳號</th><th>姓名</th><th>原始填答</th><th>有效票</th><th>處理說明</th></tr></thead>
+                <tbody id="fm-ballots"></tbody>
+              </table>
+            </div>
+          </details>
+        </div>
+      </section>
+
       <!-- 影像放大檢視 -->
       <div id="img-viewer" class="img-viewer" hidden><img alt="手寫紀錄"></div>
     </main>
@@ -327,6 +384,7 @@
   <script src="js/core/sheet-detect.js"></script>
   <script src="js/core/s2t.js"></script>
   <script src="js/core/app-form.js"></script>
+  <script src="js/core/film-calc.js"></script>
   <script src="lib/tesseract/tesseract.min.js"></script>
   <script src="lib/onnx/ort.min.js"></script>
   <script src="js/core/paddle-rec.js"></script>
@@ -337,5 +395,6 @@
   <script src="js/tabs/outpatient.js"></script>
   <script src="js/tabs/tutor.js"></script>
   <script src="js/tabs/tutor-fill.js"></script>
+  <script src="js/tabs/film.js"></script>
 </body>
 </html>
