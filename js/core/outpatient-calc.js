@@ -17,6 +17,17 @@
   const CAP_STUDENTS_PER_DAY = 3;
   // 這些單位另外排在名冊最後（使用者指示：一般內科情況特殊）
   const LAST_UNITS = ['一般內科'];
+  // 內科部門診表的科別代碼 → 單位（使用者提供，2026-11-17）
+  const CODE_UNIT = {
+    GM: '一般內科', CV: '心臟內科', CM: '胸腔內科', HEMA: '血液科', ONC: '腫瘤科', INF: '感染科', META: '新陳代謝科',
+    NEPH: '腎臟科', NEUR: '神經內科', AIR: '過敏免疫風濕科', GI: '胃腸科', GER: '高齡醫學中心',
+  };
+  // 單位名稱轉成正式名稱（申請單／系統上的簡稱 → 名冊用的名稱）
+  const UNIT_ALIAS = {
+    復健科: '復健醫學部', 復健部: '復健醫學部', 婦產部: '婦女醫學部', 婦產科: '婦女醫學部', 耳鼻喉部: '耳鼻喉頭頸部', 耳鼻喉科: '耳鼻喉頭頸部',
+    兒科: '兒童醫學部', 兒醫部: '兒童醫學部', 高齡醫學: '高齡醫學中心', 腸胃科: '胃腸科', 風濕免疫科: '過敏免疫風濕科',
+  };
+  const officialUnit = (u) => UNIT_ALIAS[String(u || '').trim()] || String(u || '').trim();
 
   const normName = (s) => String(s ?? '').normalize('NFKC').replace(/\s+/g, '');
   const isPUA = (ch) => { const c = ch.codePointAt(0); return c >= 0xE000 && c <= 0xF8FF; };
@@ -234,7 +245,7 @@
   }
 
   return {
-    RATE_PER_STUDENT, CAP_STUDENTS_PER_DAY, LAST_UNITS,
+    RATE_PER_STUDENT, CAP_STUDENTS_PER_DAY, LAST_UNITS, CODE_UNIT, UNIT_ALIAS, officialUnit,
     normName, sameName, parseRaw, parseAppDate, parseApplication, applicationRecords, compare, summarize,
     markApplicationEffect, formatDays,
   };

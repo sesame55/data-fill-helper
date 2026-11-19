@@ -23,6 +23,7 @@
       num: await make('eng', { tessedit_pageseg_mode: '7', tessedit_char_whitelist: '0123456789-./' }),
       chi7: await make('chi_tra', { tessedit_pageseg_mode: '7' }),
       chi6: await make('chi_tra', { tessedit_pageseg_mode: '6' }),
+      lat: await make('eng', { tessedit_pageseg_mode: '7', tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' }),
     })));
     return pool;
   }
@@ -46,6 +47,110 @@
       }
     }
     ctx.putImageData(img, x0, y0);
+  }
+
+  /** 多行文字格：依水平投影切成一行一行，各自以單行模式辨識（Word 版學員欄常有 2～3 行） */
+  async function ocrLines(w, canvas, ctx, r) {
+    const d = ctx.getImageData(r.left, r.top, r.width, r.height).data;
+    const rowInk = [];
+    for (let y = 0; y < r.height; y += 1) {
+      let n = 0;
+      for (let x = 0; x < r.width; x += 1) { const p = (y * r.width + x) * 4; if (0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2] < 150) n += 1; }
+      rowInk.push(n > 2);
+    }
+    const segs = []; let st = -1;
+    rowInk.forEach((v, y) => { if (v && st < 0) st = y; if (!v && st >= 0) { if (y - st > 12) segs.push([st, y]); st = -1; } });
+    if (st >= 0 && r.height - st > 12) segs.push([st, r.height]);
+    const out = [];
+    for (const [a, b] of segs) {
+      const rr = { left: r.left, top: r.top + Math.max(0, a - 6), width: r.width, height: Math.min(r.height - a, b - a + 12) };
+      if (window.PaddleRec) {
+        // PaddleOCR（中文印刷／手寫都較準）：切出這一行影像再辨識
+        const c = document.createElement('canvas'); c.width = rr.width; c.height = rr.height;
+        c.getContext('2d').drawImage(canvas, rr.left, rr.top, rr.width, rr.height, 0, 0, rr.width, rr.height);
+        try { out.push((await PaddleRec.recognize(c)).text); continue; } catch (e) { /* 失敗時改用 Tesseract */ }
+      }
+      out.push((await w.recognize(canvas, { rectangle: rr })).data.text);
+    }
+    return out.join(' ');
+  }
+
+  /** 淡紫色螢光筆塗色（內科部門診表上標示要申請的門診） */
+  const isHighlight = (R, G, B) => B - G > 25 && B - R > 5 && B > 160 && R > 100 && G > 110;
+
+  /** 找出塗色區塊（以 6px 網格合併相鄰塗色點），回傳區塊外框 */
+  function highlightBoxes(ctx, w, h) {
+    const d = ctx.getImageData(0, 0, w, h).data;
+    const step = 6; const gw = Math.ceil(w / step); const gh = Math.ceil(h / step);
+    const grid = new Uint8Array(gw * gh);
+    for (let gy = 0; gy < gh; gy += 1) for (let gx = 0; gx < gw; gx += 1) {
+      const p = ((gy * step) * w + gx * step) * 4;
+      if (isHighlight(d[p], d[p + 1], d[p + 2])) grid[gy * gw + gx] = 1;
+    }
+    const seen = new Uint8Array(gw * gh); const boxes = [];
+    for (let i = 0; i < grid.length; i += 1) {
+      if (!grid[i] || seen[i]) continue;
+      let x0 = 1e9; let y0 = 1e9; let x1 = 0; let y1 = 0; let n = 0; const st = [i]; seen[i] = 1;
+      while (st.length) {
+        const k = st.pop(); const x = k % gw; const y = (k - x) / gw; n += 1;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+        for (let dy = -2; dy <= 2; dy += 1) for (let dx = -2; dx <= 2; dx += 1) {
+          const nx = x + dx; const ny = y + dy; const j = ny * gw + nx;
+          if (nx >= 0 && ny >= 0 && nx < gw && ny < gh && grid[j] && !seen[j]) { seen[j] = 1; st.push(j); }
+        }
+      }
+      if (n >= 8) boxes.push({ x0: x0 * step, y0: y0 * step, x1: (x1 + 1) * step, y1: (y1 + 1) * step });
+    }
+    return boxes;
+  }
+
+  const CODES = ['GM', 'CV', 'CM', 'HEMA', 'ONC', 'INF', 'META', 'NEPH', 'NEUR', 'AIR', 'GI', 'GER'];
+  const VALID_CODE = new RegExp(`^(${CODES.join('|')})$`);
+  const levD = (a, b) => {
+    const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+    for (let j = 1; j <= b.length; j += 1) d[0][j] = j;
+    for (let i = 1; i <= a.length; i += 1) for (let j = 1; j <= b.length; j += 1) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    return d[a.length][b.length];
+  };
+  /** OCR 代碼 → 最接近的有效代碼（差 1 個字母以內、且唯一） */
+  function nearestCode(raw) {
+    if (!raw) return '';
+    if (VALID_CODE.test(raw)) return raw;
+    const sc = CODES.map((c) => ({ c, d: levD(raw, c) })).sort((a, b) => a.d - b.d);
+    return sc[0].d <= 1 && (!sc[1] || sc[1].d > sc[0].d) ? sc[0].c : raw;
+  }
+  /** 讀排班表的塗色格：代碼（格內）＋指導醫師（下一格） */
+  async function parseSchedule(P, canvas) {
+    const ctx = canvas.getContext('2d');
+    const items = [];
+    for (const b of highlightBoxes(ctx, canvas.width, canvas.height)) {
+      const bh = b.y1 - b.y0;
+      // 代碼：塗色底的英文字 Tesseract 常讀不出，先用 PaddleOCR，失敗再用 Tesseract
+      const cr = rect(b.x0 - 6, b.y0 - 6, b.x1 + 6, b.y1 + 6);
+      let raw = '';
+      if (window.PaddleRec) {
+        const c = document.createElement('canvas'); c.width = cr.width; c.height = cr.height;
+        c.getContext('2d').drawImage(canvas, cr.left, cr.top, cr.width, cr.height, 0, 0, cr.width, cr.height);
+        try { raw = (await PaddleRec.recognize(c)).text.normalize('NFKC').toUpperCase().replace(/[^A-Z]/g, ''); } catch (e) { raw = ''; }
+      }
+      if (!VALID_CODE.test(nearestCode(raw))) {
+        const t = ((await P.lat.recognize(canvas, { rectangle: cr })).data.text || '').replace(/[^A-Z]/g, '');
+        if (VALID_CODE.test(nearestCode(t)) || !raw) raw = t;
+      }
+      const code = nearestCode(raw);
+      // 指導醫師在緊接著的下一格（約一個格子高）：用 PaddleOCR 讀，之後以姓名相似度比對 rawdata 的老師
+      const below = rect(b.x0 - 15, b.y1 + 2, b.x1 + 15, b.y1 + 2 + Math.max(bh * 1.3, 50));
+      let teacher = '';
+      if (window.PaddleRec) {
+        const c = document.createElement('canvas'); c.width = below.width; c.height = below.height;
+        c.getContext('2d').drawImage(canvas, below.left, below.top, below.width, below.height, 0, 0, below.width, below.height);
+        try { teacher = han((await PaddleRec.recognize(c)).text); } catch (e) { teacher = ''; }
+      }
+      if (teacher.length < 2) teacher = han((await P.chi7.recognize(canvas, { rectangle: below })).data.text);
+      items.push({ code, raw, teacher, box: [b.x0, b.y0, b.x1, b.y1] });
+    }
+    // 有效代碼的「種類數」（印章等雜訊常被重複讀成同一個代碼）
+    return { items, valid: new Set(items.filter((x) => VALID_CODE.test(x.code)).map((x) => x.code)).size };
   }
 
   function inkRatio(ctx, r) {
@@ -119,7 +224,7 @@
             const rot = await chooseRotation(P, job.page);
             job.pg.rot = rot ?? 0;
             const canvas = await renderPage(job.page, job.pg.rot, 300);
-            await extractPage(P, job.pg, canvas);
+            await extractPage(P, job.pg, canvas, job.page);
             canvas.width = 0;
             if (rot === null && !job.pg.rows.length && !job.pg.unreadable) job.pg.note = '沒有偵測到申請資料（可能是排班表或空白頁），略過';
             job.pg.done = true;
@@ -153,8 +258,29 @@
       } else pg.unreadable = (pg.unreadable || 0) + 1;
     }
 
-    async function extractPage(P, pg, canvas) {
+    async function extractPage(P, pg, canvas, page) {
       const ctx = canvas.getContext('2d');
+      // 內科部門診表：有塗色格且讀得到科別代碼 → 讀「科別代碼」與下方「指導醫師」，不當申請單列處理
+      const nBoxes = highlightBoxes(ctx, canvas.width, canvas.height).length;
+      if (nBoxes >= 4) {
+        let best = await parseSchedule(P, canvas);
+        // 門診表常是橫向掃描：塗色區塊夠多（≥6，印章通常只有 2～4 塊）才試其他方向，取讀到最多有效代碼者
+        if (best.valid < 4 && page && nBoxes >= 6) {
+          for (const extra of [90, 270, 180]) {
+            const cv = await renderPage(page, ((pg.rot || 0) + extra) % 360, 300);
+            const res = await parseSchedule(P, cv);
+            cv.width = 0;
+            if (res.valid > best.valid) best = res;
+          }
+        }
+        if (best.valid >= 4) {
+          pg.format = '內科部門診表';
+          pg.schedule = best.items.filter((x) => VALID_CODE.test(x.code));
+          pg.scheduleAll = best.items;   // 含無效代碼（除錯用）
+          pg.note = `內科部門診表：塗色 ${pg.schedule.length} 格（${pg.schedule.map((x) => `${x.code} ${x.teacher}`).join('、')}）`;
+          return;
+        }
+      }
       // 標題判斷：「住診教學紀錄表」（手寫，一頁一筆）
       const top = (await P.chi6.recognize(canvas, { rectangle: rect(0, 0, canvas.width, canvas.height * 0.3) })).data.text;
       if (/紀錄表|記錄表/.test(top.replace(/\s/g, ''))) { await extractRecordForm(P, pg, canvas, top); return; }
@@ -182,7 +308,7 @@
         if (inkRatio(ctx, rect(c[0], r.top, c[Math.min(3, c.length - 1)], r.bottom, 8)) < 0.004) continue;   // 空白列
         let dateText; let teacher; let students;
         if (word) {
-          const [t, s, d] = await Promise.all([cell(0, r, P.chi7), cell(1, r, P.chi6), cell(2, r, P.num)]);
+          const [t, s, d] = await Promise.all([cell(0, r, P.chi7), ocrLines(P.chi6, canvas, ctx, rect(c[1] + 8, r.top + 4, c[2] - 8, r.bottom)), cell(2, r, P.num)]);
           teacher = han(t);
           students = s.normalize('NFKC').split(/[、,，;；\s\n]+/).map(han).filter((x) => x.length >= 2);
           const m = d.normalize('NFKC').match(ROC_RE);
@@ -199,11 +325,20 @@
           if (inkRatio(ctx, rect(c[0], r.top, c[Math.min(3, c.length - 1)], r.bottom, 8)) >= 0.02) pg.unreadable = (pg.unreadable || 0) + 1;
           continue;
         }
+        // 系統印出版：申請單上「老師完成否」欄（第 6 欄）有沒有 Y；主治醫師格右側空白處有沒有審核畫記「/」
+        let teacherDone = null; let marked = false;
+        if (!word && c.length >= 8) teacherDone = inkRatio(ctx, rect(c[5], r.top, c[6], r.bottom, 10)) > 0.008;
+        if (!word) {
+          const tw = c[2] - c[1];
+          marked = inkRatio(ctx, rect(c[2] - tw * 0.3, r.top, c[2] - 6, r.bottom, 4)) > 0.01;
+        }
         (students.length ? students : ['']).forEach((st) => pg.rows.push({
           id: ++seq, ocrText: `${dateText} ${teacher} ${st}`.trim(), ocrDate: dateText,
           date: A.fixDate(dateText, getYm() || '2000-01'), teacher, student: st, include: true, card: '',
+          word, teacherDone, marked, order: pg.page * 1000 + pg.rows.length,
         }));
       }
+      pg.hasMarks = pg.rows.some((x) => x.marked);
     }
 
     function rematch() {
@@ -226,8 +361,12 @@
         <div class="stat"><span>系統無紀錄（紅字計入）</span><b class="text-red">${count('no-system') - undated}</b></div>
         <div class="stat"><span>日期無法辨識（紅字、金額空白）</span><b class="text-red">${undated}</b></div>
         <div class="stat"><span>整列無法辨識（手寫等，紅字提醒）</span><b class="text-red">${pages.reduce((a, p) => a + (p.unreadable || 0), 0)}</b></div>` : '';
-      const notes = pages.filter((p) => p.note);
-      $('.ap-notes').innerHTML = notes.length ? `略過的頁：${notes.map((p) => `${esc(p.file)} 第 ${p.page} 頁`).join('、')}` : '';
+      const sched = pages.filter((p) => p.schedule);
+      const notes = pages.filter((p) => p.note && !p.schedule);
+      $('.ap-notes').innerHTML = [
+        sched.map((p) => `${esc(p.file)} 第 ${p.page} 頁 ${esc(p.note)}`).join('<br>'),
+        notes.length ? `略過的頁：${notes.map((p) => `${esc(p.file)} 第 ${p.page} 頁`).join('、')}` : '',
+      ].filter(Boolean).join('<br>');
     }
 
     const api = {
@@ -244,6 +383,8 @@
         // 整列讀不出（手寫等）：每頁一列紅字提醒
         ...pages.filter((p) => p.unreadable).map((p) => ({ unit: p.unit, teacher: `（${p.unreadable} 列無法辨識：${p.file} 第${p.page}頁，請人工核對）`, student: '', where: `${p.file} p${p.page}`, text: '' })),
       ],
+      /** 內科部門診表（塗色格）：[{ file, page, code, teacher }] */
+      schedule: () => pages.flatMap((p) => (p.schedule || []).map((x) => ({ file: p.file, page: p.page, ...x }))),
       /** 與申請單對到的 rawdata 列號（綠色標示用） */
       matchedRowNums: () => matched.filter((m) => m.match && m.match.rowNum).map((m) => m.match.rowNum),
       reset() { pages = []; queue.length = 0; matched = []; render(); setStatus(''); },

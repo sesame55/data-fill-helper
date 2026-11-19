@@ -8,12 +8,13 @@
  * rawdata 列：parseRawRows 產生 { tCard, tName, sName, date, done, unit }
  */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory(require('./inpatient-calc.js'));
-  else root.AppForm = factory(root.InpatientCalc);
-})(typeof self !== 'undefined' ? self : this, (Base) => {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./inpatient-calc.js'), require('./s2t.js'));
+  else root.AppForm = factory(root.InpatientCalc, root.S2T);
+})(typeof self !== 'undefined' ? self : this, (Base, S2T) => {
   const isPUA = (ch) => { const c = ch.codePointAt(0); return c >= 0xE000 && c <= 0xF8FF; };
   /** 姓名正規化：NFKC、只留中日韓文字與英數 */
-  const normName = (s) => String(s ?? '').normalize('NFKC').replace(/[^\p{Script=Han}A-Za-z0-9-]/gu, '');
+  // 先轉繁體（PaddleOCR 常輸出簡體字），再只留中日韓文字與英數
+  const normName = (s) => (S2T ? S2T.convert(String(s ?? '').normalize('NFKC')) : String(s ?? '').normalize('NFKC')).replace(/[^\p{Script=Han}A-Za-z0-9-]/gu, '');
 
   /** 姓名相似度 0～1（共同字數 / 較長者字數；造字視為相符） */
   function sim(a, b) {
@@ -120,7 +121,7 @@
   function teacherCard(rawRows, name) {
     let best = null; let bestS = 0;
     const seen = new Map();
-    rawRows.forEach((r) => { if (!seen.has(r.tCard)) seen.set(r.tCard, r); });
+    rawRows.forEach((r) => { if (r.tName && r.tName.length >= 2 && !seen.has(r.tCard)) seen.set(r.tCard, r); });   // 略過姓名空白的紀錄
     seen.forEach((r) => { const s = sim(name, r.tName); if (s > bestS) { bestS = s; best = r; } });
     return bestS >= 0.66 ? best : null;
   }
@@ -130,7 +131,11 @@
    * 有系統紀錄者用系統的卡號／姓名；沒有者以姓名找卡號（或使用者手動填的 card），標記 inSystem=false。
    */
   function toRecords(matched, rawRows) {
-    return matched.filter((m) => m.include !== false).map((m) => {
+    // 申請單上這一列是否「核准」：Word 版全部算；系統印出版看申請單上「老師完成否」欄是否為 Y
+    const eligibleOf = (m) => (m.word ? true : m.teacherDone !== false);
+    return matched.filter((m) => m.include !== false).map((m) => ({ ...toRecord(m), eligible: eligibleOf(m), order: m.order ?? 0, file: m.page?.file, page: m.page?.page }))
+      .filter((r) => r.date);
+    function toRecord(m) {
       if (m.match) {
         return { card: m.match.tCard, name: m.match.tName, unit: m.unit || m.match.unit, date: m.match.date,
           student: normName(m.match.sName), source: '申請單', appUnit: m.unit, inSystem: m.match.done };
@@ -139,7 +144,7 @@
       // 系統無紀錄：直接計入、紅字；找不到卡號時卡號留空、姓名用辨識文字（下載後人工核對）
       return { card: t?.tCard || '', name: t?.tName || normName(m.teacher) || `（無法辨識：${m.page?.file || ''} p${m.page?.page || ''}）`,
         unit: m.unit, date: m.date, student: normName(m.student), source: '申請單', appUnit: m.unit, inSystem: false, unresolved: !t };
-    }).filter((r) => r.date);
+    }
   }
 
   return { normName, sim, fixDate, parseRawRows, matchRows, teacherCard, toRecords };

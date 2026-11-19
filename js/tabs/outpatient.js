@@ -71,7 +71,17 @@
     }
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buffer);
-    const info = Fill.analyzeTemplate(wb.worksheets[0]);
+    const ws = wb.worksheets[0];
+    const info = Fill.analyzeTemplate(ws);
+    // 已填好卡號的名冊（例如上個月的正確版）→ 當作「單位對照」：學習 卡號 → 單位
+    const ref = new Map();
+    for (let r = info.startRow; r < info.totalRow; r += 1) {
+      const row = ws.getRow(r);
+      const card = String(row.getCell(info.cols.card).text || '').trim();
+      const unit = info.cols.unit ? String(row.getCell(info.cols.unit).text || '').trim() : '';
+      if (card && unit) ref.set(card.padStart(4, '0'), unit);
+    }
+    if (ref.size) { state.unitRef = ref; state.unitRefName = file.name; return; }
     if (!info.rocYear || !info.month) throw new Error('範本第一筆資料列找不到「年」「月」');
     state.template = { name: file.name, buffer, info };
   }
@@ -108,16 +118,59 @@
       state.appRecords = O.applicationRecords(state.apps, state.parsed.directory, prefix, state.cardOverride);
       state.compare = O.compare(state.parsed.records, state.appRecords);
       const hasApp = state.apps.length > 0 || appPdf.hasData();
-      // 系統已評核紀錄（老師卡號＋日期＋學員）→ 判斷申請單列是否「系統有紀錄」
-      const inSys = (r) => state.parsed.records.some((x) => x.card === r.card && x.date === r.date && O.sameName(x.student, r.student));
-      const docRecs = state.appRecords.map((r) => ({ ...r, inSystem: inSys(r) }));
-      const pdfRecs = appPdf.records().filter((r) => r.date.startsWith(prefix)).map((r) => ({ ...r, student: O.normName(r.student) }));
-      // 計費基準：有申請單 → 只算申請單上的；沒有 → 暫以系統全部已評核紀錄
-      let base = hasApp ? [...pdfRecs, ...docRecs] : state.parsed.records.map((r) => ({ ...r, inSystem: true }));
+      // 計費規則（依 115/09 正確版歸納，2026-11-17）：
+      //  1. 一般內科（Word 申請單上的老師）：該老師當月系統「全部」已評核紀錄。
+      //  2. 其他單位（PDF 申請單）：只算申請單上「核准」的列——Word 版全部；系統印出版頁上有審核畫記「/」
+      //     只算有畫記的列，沒有畫記則看申請單上「老師完成否」欄是否為 Y（不看系統現況）。
+      //  3. 每位學員 500 元，每位老師每日上限 3 位。排序依申請單出現順序，一般內科在最後。
+      const special = new Set(state.appRecords.map((r) => r.card).filter(Boolean));
+      const specialRecs = state.parsed.records.filter((r) => special.has(r.card))
+        .map((r) => ({ ...r, inSystem: true, appUnit: '一般內科', order: 1e9 }));
+      // 內科部門診表（塗色格）：之後頁面的內科部申請單，只算塗色格上的老師；單位依科別代碼
+      const sched = appPdf.schedule();
+      const schedCard = new Map();   // 卡號 → 單位
+      // 塗色格下方讀到的姓名（可能多讀了旁邊的字）→ 找 rawdata 中最相似的老師（含部分比對）
+      const teachers = new Map();
+      state.rawRows.forEach((r) => { if (r.tName && r.tName.length >= 2 && !teachers.has(r.tCard)) teachers.set(r.tCard, r.tName); });   // 略過姓名空白的紀錄
+      const findTeacher = (txt) => {
+        let best = null; let bs = 0;
+        teachers.forEach((name, card) => {
+          const sc = Math.max(AppForm.sim(txt, name), txt.includes(name) ? 1 : 0, ...[0, 1, 2].map((i) => AppForm.sim(txt.slice(i, i + name.length), name)));
+          if (sc > bs) { bs = sc; best = card; }
+        });
+        return bs >= 0.6 ? best : '';
+      };
+      state.schedule = sched.map((x) => ({ ...x, card: findTeacher(x.teacher) }));
+      state.schedule.forEach((x) => { if (x.card && O.CODE_UNIT[x.code] && x.code !== 'GM') schedCard.set(x.card, O.CODE_UNIT[x.code]); });
+      // 每個檔案取塗色格最多的那一頁當排班表；之後的頁面為內科部申請單
+      const schedPage = new Map();
+      [...new Set(sched.map((x) => x.file))].forEach((f) => {
+        const cnt = {}; sched.filter((x) => x.file === f).forEach((x) => { cnt[x.page] = (cnt[x.page] || 0) + 1; });
+        schedPage.set(f, Number(Object.entries(cnt).sort((a, b) => b[1] - a[1])[0][0]));
+      });
+      const isInternal = (r) => schedPage.has(r.file) && r.page > schedPage.get(r.file);
+      const ok = (r) => r.eligible !== false && !special.has(r.card) && (!isInternal(r) || schedCard.has(r.card));
+      const monthRecs = appPdf.records().filter((r) => r.date.startsWith(prefix));
+      const pdfRecs = monthRecs.filter(ok).map((r) => ({ ...r, student: O.normName(r.student) }));
+      state.skippedRows = monthRecs.filter((r) => !ok(r) && !special.has(r.card));
+      // 沒有申請單 → 暫以系統全部已評核紀錄
+      let base = hasApp ? [...pdfRecs, ...specialRecs] : state.parsed.records.map((r) => ({ ...r, inSystem: true }));
       if (!$('op-include-app').checked) base = base.filter((r) => r.inSystem !== false);
       const all = O.summarize(base);
       const sysOnly = O.summarize(base.filter((r) => r.inSystem !== false));
       state.summary = O.markApplicationEffect(all, sysOnly);
+      // 單位：過去的正確版名冊（卡號→單位）優先；一般內科固定；其餘用申請單／系統
+      const key = (x) => x.card || `name:${x.name}`;
+      state.summary.forEach((x) => {
+        if (special.has(x.card)) x.unit = '一般內科';
+        else if (schedCard.has(x.card)) x.unit = schedCard.get(x.card);
+        else if (state.unitRef?.has(x.card)) x.unit = state.unitRef.get(x.card);
+        else x.unit = O.officialUnit(x.unit);
+      });
+      // 排序：申請單出現順序；一般內科最後
+      const firstOrder = new Map();
+      base.forEach((r) => { const k = key(r); const o = r.order ?? 1e8; if (!firstOrder.has(k) || o < firstOrder.get(k)) firstOrder.set(k, o); });
+      state.summary.sort((a, b) => (firstOrder.get(key(a)) ?? 1e8) - (firstOrder.get(key(b)) ?? 1e8));
       // 系統有紀錄、但不在任何申請單上（參考用）
       state.unclaimed = hasApp
         ? state.parsed.records.filter((x) => !base.some((r) => r.card === x.card && r.date === x.date && O.sameName(x.student, r.student)))
@@ -153,6 +206,7 @@
       item(!!t, '範本', t ? `${esc(t.name)}・${t.info.rocYear} 年 ${t.info.month} 月・可填 ${t.info.capacity} 列` : '尚未匯入'),
       item(!!r, 'rawdata', r ? `${esc(r.name)}・${money(r.rows.length)} 筆${p ? `・本月已評核 ${money(p.records.length)} 筆` : ''}` : '尚未匯入'),
       item(state.apps.length > 0, '申請單', appDetail),
+      item(!!state.unitRef, '單位對照', state.unitRef ? `${esc(state.unitRefName)}・${state.unitRef.size} 位老師` : '（選填：匯入過去已填好的名冊，單位會依它填寫）'),
       state.busy.length ? `<div class="status-item busy"><span class="dot"></span>讀取中：${esc(state.busy.join('、'))}</div>` : '',
     ].join('');
   }
@@ -210,6 +264,10 @@
     const warns = [];
     if (!state.apps.length && !appPdf.hasData()) warns.push('尚未匯入申請單：目前暫以 rawdata 全部已評核紀錄計算（正式計費請匯入申請單）。');
     if (appPdf.busy()) warns.push('申請單辨識中…結果會自動更新。');
+    if (state.skippedRows?.length) {
+      const who = [...new Set(state.skippedRows.map((r) => r.name))];
+      warns.push(`申請單上不計的列（申請單「老師完成否」空白，或內科部門診表上沒有塗色）：${state.skippedRows.length} 列（${who.slice(0, 12).map(esc).join('、')}${who.length > 12 ? '…' : ''}）`);
+    }
     const noCardApp = s.filter((x) => !x.card && x.highlight).length;
     if (noCardApp) warns.push(`有 ${noCardApp} 列為申請單上無法辨識或找不到卡號的老師，下載的名冊中為<b>紅字、卡號空白</b>（日期無法辨識者金額也空白），請人工核對。`);
     if (state.unclaimed.length) {
