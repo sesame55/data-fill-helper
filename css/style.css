@@ -661,3 +661,13 @@ select,
   cursor: pointer;
   font-weight: 600;
 }
+.file-table tr td.film-short, .film-legend.film-short { background: #c6efce; }
+.file-table tr td.film-lv-mid, .film-legend.film-lv-mid { background: #ddebf7; }
+.file-table tr td.film-lv-high, .film-legend.film-lv-high { background: #f8cbad; }
+.file-table tr td.film-copy, .film-legend.film-copy { background: #e4dfec; }
+.film-legend { padding: 0 0.3rem; border-radius: 3px; }
+.file-table td.film-reason { min-width: 12rem; max-width: 20rem; white-space: normal; }
+.stat.film-short-stat { background: #c6efce; }
+.stat.film-high-stat { background: #f8cbad; }
+.stat.film-mid-stat { background: #ddebf7; }
+.stat.film-copy-stat { background: #e4dfec; }

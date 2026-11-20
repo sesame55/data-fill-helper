@@ -70,7 +70,7 @@
           <button class="feature-card" data-goto="film">
             <span class="card-tag">可使用</span>
             <h3>全人電影</h3>
-            <p>心得張貼 ＋ 票選資料：依規則重新計票（重複號碼只算一次），並標出作者部門含「聯合」「台南」者。</p>
+            <p>心得張貼 ＋ 票選資料：依規則重新計票（重複號碼只算一次），標出作者部門含「聯合」「台南」者，並附字數、AI 風格與複製參考。</p>
           </button>
           <div class="feature-card disabled">
             <span class="card-tag gray">規劃中</span>
@@ -334,7 +334,13 @@
             <b>計票規則</b>：直接解析每張票的<b>原始填答</b>（不用 Excel 已切好的三欄，那三欄常切錯）。
             全形數字、頓號、全形逗號、換行、「1.」「2，」序號都能處理；連在一起的號碼（如 103106108）自動切開。
             只算心得檔裡真的有心得的編號；<b>同一張票重複的號碼只算一次</b>；每張票最多 3 票。<br>
-            <b>部門對照</b>：以心得作者姓名對照「符合票選資格」的姓名取得部門，找不到再查其他名單工作表（如 Sheet1）。只用姓名比對，同名者請人工確認。
+            <b>部門對照</b>：以心得作者姓名對照「符合票選資格」的姓名取得部門，找不到再查其他名單工作表（如 Sheet1）。只用姓名比對，同名者請人工確認。<br>
+            <b>字數與 AI 風格（僅供參考，不能當作認定依據）</b>：字數只算中文字。不足 100 字的心得格填<span class="film-legend film-short">綠色</span>。
+            不足 60 字為「無法判斷」。其餘評分：AI 常見句型（如「不只是…更是」「不是…而是」、說教式收尾、總結語、文藝套語）、
+            段落長度很平均、有標題或條列、評論腔用語、書面標點、含英文片名或導演演員全名等資料、篇幅長會加分；
+            口語用詞、非標準標點、個人經驗會減分。7 分以上<span class="film-legend film-lv-high">高</span>、4 分以上<span class="film-legend film-lv-mid">中</span>、其餘低；
+            不足 150 字最高只判中。判斷依據欄會列出每篇加減分的理由。
+            心得之間有大段相同文字（佔較短一篇一半以上）者，在「複製參考」以<span class="film-legend film-copy">紫色</span>列出對方編號（最多 4 篇）。
           </div>
         </div>
 
@@ -343,13 +349,22 @@
           <div id="fm-stats" class="stats"></div>
           <div id="fm-warnings"></div>
           <div class="result-toolbar">
-            <input id="fm-filter" type="search" placeholder="搜尋編號、作者、部門、心得內容">
+            <input id="fm-filter" type="search" placeholder="搜尋編號、作者、部門、心得內容、判斷依據">
+            <label>顯示
+              <select id="fm-show">
+                <option value="all">全部</option>
+                <option value="short">不足 100 字</option>
+                <option value="ai">AI 風格 中／高</option>
+                <option value="high">AI 風格 高</option>
+                <option value="copy">與他人有相同段落</option>
+              </select>
+            </label>
             <label class="check-inline"><input id="fm-only-flag" type="checkbox"><span id="fm-only-flag-label">只顯示標示者</span></label>
             <button id="fm-download" class="btn-primary inline">下載心得票數 (.xlsx)</button>
           </div>
           <div class="table-wrap">
             <table class="file-table">
-              <thead><tr><th>編號</th><th>心得</th><th>心得作者</th><th>票數</th><th>部門（對照02）</th><th id="fm-flag-head">標示</th><th>對照說明</th></tr></thead>
+              <thead><tr><th>編號</th><th>心得</th><th>心得作者</th><th>票數</th><th>部門（對照02）</th><th id="fm-flag-head">標示</th><th>對照說明</th><th>AI風格參考</th><th>判斷依據（僅供參考）</th><th>網路/他人複製參考</th></tr></thead>
               <tbody id="fm-result"></tbody>
             </table>
           </div>

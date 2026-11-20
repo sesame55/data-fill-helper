@@ -83,7 +83,11 @@
       <div class="stat"><span>有效票</span><b>${s.validVotes.toLocaleString()}</b></div>
       <div class="stat muted-stat"><span>全部無效的票</span><b>${s.noValid}</b></div>
       <div class="stat"><span>部門含「${esc(kwLabel(r))}」</span><b>${m.flagged} 位</b></div>
-      <div class="stat"><span>作者 02 查無此人</span><b class="${m.notFound ? 'text-red' : ''}">${m.notFound}</b></div>`;
+      <div class="stat"><span>作者 02 查無此人</span><b class="${m.notFound ? 'text-red' : ''}">${m.notFound}</b></div>
+      <div class="stat film-short-stat"><span>不足 ${F.SHORT_HAN} 字</span><b>${r.style.short}</b></div>
+      <div class="stat film-high-stat"><span>AI 風格 高</span><b>${r.style.levels.高}</b></div>
+      <div class="stat film-mid-stat"><span>AI 風格 中</span><b>${r.style.levels.中}</b></div>
+      <div class="stat film-copy-stat"><span>與他人有相同段落</span><b>${r.style.copied}</b></div>`;
     const warns = [];
     if (state.essays.data.skipped.length) warns.push(`略過沒有作者欄的工作表：${state.essays.data.skipped.join('、')}`);
     if (s.dupBallots) warns.push(`${s.dupBallots} 張票有重複號碼，只算一次`);
@@ -104,12 +108,24 @@
     if (!r) return;
     const q = $('fm-filter').value.trim();
     const onlyFlag = $('fm-only-flag').checked;
-    const rows = r.rows.filter((x) => (!onlyFlag || x.flag) && (!q || [x.no, x.author, x.dept, x.text, x.note].some((v) => String(v).includes(q))));
+    const show = $('fm-show').value;
+    const pass = {
+      all: () => true,
+      short: (x) => x.short,
+      ai: (x) => x.level === '高' || x.level === '中',
+      high: (x) => x.level === '高',
+      copy: (x) => !!x.copy,
+    }[show] || (() => true);
+    const rows = r.rows.filter((x) => (!onlyFlag || x.flag) && pass(x)
+      && (!q || [x.no, x.author, x.dept, x.text, x.note, x.reason, x.copy].some((v) => String(v).includes(q))));
+    const lvClass = { 高: 'film-lv-high', 中: 'film-lv-mid' };
     $('fm-result').innerHTML = rows.map((x) => `<tr class="${x.flag ? 'row-warn' : ''}">
-      <td>${x.no}</td><td class="film-text" title="${esc(x.text)}"><div class="clamp">${esc(x.text)}</div></td><td>${esc(x.author)}</td>
+      <td>${x.no}</td><td class="film-text ${x.short ? 'film-short' : ''}" title="${esc(x.text)}"><div class="clamp">${esc(x.text)}</div><span class="muted small">${x.han} 字</span></td><td>${esc(x.author)}</td>
       <td class="num">${x.votes}</td><td>${esc(x.dept)}</td><td>${x.flag ? '是' : ''}</td>
-      <td class="${x.note ? 'text-red' : ''} small">${esc(x.note)}</td></tr>`).join('')
-      || '<tr class="empty"><td colspan="7">沒有符合的資料</td></tr>';
+      <td class="${x.note ? 'text-red' : ''} small">${esc(x.note)}</td>
+      <td class="${lvClass[x.level] || ''}">${esc(x.level)}</td><td class="small film-reason">${esc(x.reason)}</td>
+      <td class="small film-reason ${x.copy ? 'film-copy' : ''}">${esc(x.copy)}</td></tr>`).join('')
+      || '<tr class="empty"><td colspan="10">沒有符合的資料</td></tr>';
   }
 
   function renderBallots() {
@@ -121,6 +137,7 @@
 
   $('fm-filter').addEventListener('input', renderTable);
   $('fm-only-flag').addEventListener('change', renderTable);
+  $('fm-show').addEventListener('change', renderTable);
   $('fm-keywords').addEventListener('change', recompute);
 
   /* ---------- 下載 ---------- */
@@ -144,16 +161,21 @@
     try {
       const wb = new ExcelJS.Workbook();
       const ws = wb.addWorksheet('心得票數');
-      ws.addRow(['編號', '心得', '心得作者', '票數', '部門（對照02）', kwLabel(r), '對照說明']);
-      const hl = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE699' } };
+      ws.addRow(['編號', '心得', '心得作者', '票數', '部門（對照02）', kwLabel(r), '對照說明', 'AI風格參考', '判斷依據（僅供參考）', '網路/他人複製參考']);
+      const solid = (argb) => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
+      const hl = solid('FFFFE699');                                   // 部門含關鍵字：整列黃
+      const fills = { short: solid('FFC6EFCE'), 中: solid('FFDDEBF7'), 高: solid('FFF8CBAD'), copy: solid('FFE4DFEC') };
       for (const x of r.rows) {
-        const row = ws.addRow([x.no, x.text, x.author, x.votes, x.dept || null, x.flag ? '是' : null, x.note || null]);
+        const row = ws.addRow([x.no, x.text, x.author, x.votes, x.dept || null, x.flag ? '是' : null, x.note || null, x.level, x.reason || null, x.copy || null]);
         if (x.flag) for (let c = 1; c <= 7; c++) row.getCell(c).fill = hl;
+        if (x.short) row.getCell(2).fill = fills.short;               // 不足 100 字：心得格綠
+        if (fills[x.level]) row.getCell(8).fill = fills[x.level];     // AI 風格 中＝藍、高＝橘
+        if (x.copy) row.getCell(10).fill = fills.copy;               // 有相同段落：紫
         if (x.note) row.getCell(7).font = { color: { argb: 'FFC00000' } };
       }
-      styleSheet(ws, [8, 90, 12, 8, 22, 10, 20]);
+      styleSheet(ws, [8, 90, 12, 8, 22, 10, 20, 12, 50, 45]);
       ws.getColumn(1).numFmt = '@';
-      [1, 3, 4, 6].forEach((c) => ws.getColumn(c).eachCell((cell, i) => { if (i > 1) cell.alignment = { ...cell.alignment, horizontal: 'center' }; }));
+      [1, 3, 4, 6, 8].forEach((c) => ws.getColumn(c).eachCell((cell, i) => { if (i > 1) cell.alignment = { ...cell.alignment, horizontal: 'center' }; }));
 
       const d = wb.addWorksheet('計票明細');
       d.addRow(['原始列號', '帳號', '姓名', '原始填答', '有效票1', '有效票2', '有效票3', '處理說明']);
