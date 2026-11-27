@@ -109,5 +109,30 @@
     return { filled: summary.length, inserted: Math.max(0, extra), total };
   }
 
-  return { analyzeTemplate, fillTemplate };
+  /**
+   * 沒有範本時：建立同格式的空白名冊（標題、表頭、1 列資料、合計列），再交給 fillTemplate 填寫
+   * opts: { title, rocYear, month, withDays }
+   */
+  function blankTemplate(ExcelJS, { title, rocYear, month, withDays }) {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet('Sheet1');
+    const head = ['年', '月', '單位', '卡號', '姓名', '金額', '備註', ...(withDays ? ['教學日'] : [])];
+    const n = head.length;
+    const border = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+    ws.mergeCells(1, 1, 1, n); ws.getCell(1, 1).value = title;
+    ws.mergeCells(2, 1, 2, n); ws.getCell(2, 1).value = `（${rocYear}年${String(month).padStart(2, '0')}月）`;
+    [1, 2].forEach((r) => { ws.getRow(r).font = { bold: true, size: 14 }; ws.getCell(r, 1).alignment = { horizontal: 'center' }; });
+    ws.getRow(3).values = head;
+    ws.getRow(3).font = { bold: true };
+    ws.getRow(4).values = [rocYear, month, '', '', '', null, '匯入銀行帳號', ...(withDays ? [''] : [])];
+    [3, 4].forEach((r) => { for (let c = 1; c <= n; c += 1) ws.getCell(r, c).border = border; });
+    ws.getCell(5, 5).value = '合計';
+    ws.getCell(5, 6).value = { formula: 'SUM(F4:F4)', result: 0 };
+    ws.getCell(5, 6).numFmt = '#,##0';
+    ws.getColumn(6).numFmt = '#,##0';
+    [6, 6, 16, 10, 12, 10, 16, 28].slice(0, n).forEach((w, i) => { ws.getColumn(i + 1).width = w; });
+    return wb;
+  }
+
+  return { analyzeTemplate, fillTemplate, blankTemplate };
 });

@@ -53,7 +53,24 @@
         setBusy(f.name, false);
       }
     }
+    guessMonth(files);
     recompute();
+  }
+
+  /** 沒有範本時，從檔名猜月份：「202609」或民國「11509」；多個檔案時取出現最多的月份 */
+  function guessMonth(files) {
+    const el = $('op-month');
+    if (state.template) { el.value = targetYm(); return; }
+    if (el.value) return;
+    const cnt = {};
+    files.forEach((f) => {
+      const w = f.name.match(/20(\d{2})(0[1-9]|1[0-2])/);
+      const r = f.name.match(/1(\d{2})(0[1-9]|1[0-2])(?!\d)/);
+      const ym = w ? `20${w[1]}-${w[2]}` : r ? `${Number(`1${r[1]}`) + 1911}-${r[2]}` : '';
+      if (ym) cnt[ym] = (cnt[ym] || 0) + 1;
+    });
+    const best = Object.entries(cnt).sort((x, y) => y[1] - x[1] || y[0].localeCompare(x[0]))[0];
+    if (best) el.value = best[0];
   }
 
   async function loadXlsx(file) {
@@ -88,7 +105,7 @@
 
   async function loadDoc(file) {
     const doc = DocReader.parse(new Uint8Array(await file.arrayBuffer()));
-    const year = state.template ? state.template.info.rocYear + 1911 : new Date().getFullYear();
+    const year = targetYm() ? Number(targetYm().slice(0, 4)) : new Date().getFullYear();
     const app = O.parseApplication(doc, year);
     state.apps = state.apps.filter((a) => a.file !== file.name);
     state.apps.push({ file: file.name, ...app });
@@ -101,7 +118,13 @@
 
   // ---------- 計算 ----------
   // ---------- 申請單（PDF）：計費基準 ----------
-  const targetYm = () => (state.template ? `${state.template.info.rocYear + 1911}-${String(state.template.info.month).padStart(2, '0')}` : '');
+  const targetYm = () => (state.template ? `${state.template.info.rocYear + 1911}-${String(state.template.info.month).padStart(2, '0')}` : ($('op-month').value || ''));
+  /** 名冊資訊：有範本用範本；沒有範本用月份欄 */
+  const tinfo = () => {
+    if (state.template) return state.template.info;
+    const ym = targetYm();
+    return { rocYear: Number(ym.slice(0, 4)) - 1911, month: Number(ym.slice(5, 7)), capacity: Infinity };
+  };
   const appPdf = AppPdf.create({
     root: $('op-app'),
     getRawRows: () => state.rawRows || [],
@@ -110,8 +133,10 @@
   });
 
   function recompute(fromApp) {
-    const t = state.template?.info;
-    state.parsed = state.raw && t ? O.parseRaw(state.raw.rows, t.rocYear + 1911, t.month) : null;
+    const ym0 = targetYm();
+    state.parsed = state.raw && ym0 ? O.parseRaw(state.raw.rows, Number(ym0.slice(0, 4)), Number(ym0.slice(5, 7))) : null;
+    // 沒有申請單時的排序依據：rawdata 原始順序
+    if (state.parsed) state.parsed.records.forEach((r, i) => { r.order = 5e8 + i; });
     if (!fromApp && appPdf.hasData()) { appPdf.rematch(); return; }   // rematch 完會再呼叫 recompute(true)
     if (state.parsed) {
       const prefix = targetYm();
@@ -124,8 +149,11 @@
       //     只算有畫記的列，沒有畫記則看申請單上「老師完成否」欄是否為 Y（不看系統現況）。
       //  3. 每位學員 500 元，每位老師每日上限 3 位。排序依申請單出現順序，一般內科在最後。
       const special = new Set(state.appRecords.map((r) => r.card).filter(Boolean));
+      // 一般內科：依 Word 申請單上老師出現的順序排在最後
+      const docOrder = new Map();
+      state.appRecords.forEach((r, i) => { if (r.card && !docOrder.has(r.card)) docOrder.set(r.card, i); });
       const specialRecs = state.parsed.records.filter((r) => special.has(r.card))
-        .map((r) => ({ ...r, inSystem: true, appUnit: '一般內科', order: 1e9 }));
+        .map((r) => ({ ...r, inSystem: true, appUnit: '一般內科', order: 1e9 + (docOrder.get(r.card) ?? 0) }));
       // 內科部門診表（塗色格）：之後頁面的內科部申請單，只算塗色格上的老師；單位依科別代碼
       const sched = appPdf.schedule();
       const schedCard = new Map();   // 卡號 → 單位
@@ -170,6 +198,13 @@
       // 排序：申請單出現順序；一般內科最後
       const firstOrder = new Map();
       base.forEach((r) => { const k = key(r); const o = r.order ?? 1e8; if (!firstOrder.has(k) || o < firstOrder.get(k)) firstOrder.set(k, o); });
+      // 內科部：依門診表塗色格的時間順序，排在其他單位之後、一般內科之前
+      state.schedule.forEach((x) => {
+        if (x.card && schedCard.has(x.card) && !special.has(x.card)) {
+          const o = 1e7 + (x.seq ?? 0);
+          if (!firstOrder.has(x.card) || firstOrder.get(x.card) < 1e7 || o < firstOrder.get(x.card)) firstOrder.set(x.card, o);
+        }
+      });
       state.summary.sort((a, b) => (firstOrder.get(key(a)) ?? 1e8) - (firstOrder.get(key(b)) ?? 1e8));
       // 系統有紀錄、但不在任何申請單上（參考用）
       state.unclaimed = hasApp
@@ -203,7 +238,7 @@
       }).join('、')
       : '（選填，可多個）';
     $('op-status').innerHTML = [
-      item(!!t, '範本', t ? `${esc(t.name)}・${t.info.rocYear} 年 ${t.info.month} 月・可填 ${t.info.capacity} 列` : '尚未匯入'),
+      item(!!t, '範本', t ? `${esc(t.name)}・${t.info.rocYear} 年 ${t.info.month} 月・可填 ${t.info.capacity} 列` : '（選填）未匯入時，依「月份」產生同格式的空白名冊'),
       item(!!r, 'rawdata', r ? `${esc(r.name)}・${money(r.rows.length)} 筆${p ? `・本月已評核 ${money(p.records.length)} 筆` : ''}` : '尚未匯入'),
       item(state.apps.length > 0, '申請單', appDetail),
       item(!!state.unitRef, '單位對照', state.unitRef ? `${esc(state.unitRefName)}・${state.unitRef.size} 位老師` : '（選填：匯入過去已填好的名冊，單位會依它填寫）'),
@@ -244,6 +279,7 @@
   });
   $('op-cmp-diff-only').addEventListener('change', renderCompare);
   $('op-include-app').addEventListener('change', recompute);
+  $('op-month').addEventListener('change', () => recompute());
 
   function renderResult() {
     const show = !!state.parsed;
@@ -276,15 +312,16 @@
     }
     const noCard = s.filter((x) => !x.card);
     state.apps.filter((a) => a.errors.length).forEach((a) => warns.push(`${esc(a.unit || a.file)} 申請單：${a.errors.map(esc).join('；')}`));
-    if (s.length > state.template.info.capacity) {
-      warns.push(`人數 ${s.length} 超過範本 ${state.template.info.capacity} 列，下載時會自動增加列數並更新合計公式`);
+    if (!state.template) warns.push('未匯入範本：下載時會產生同格式的空白名冊（年、月、單位、卡號、姓名、金額、備註）。');
+    else if (s.length > tinfo().capacity) {
+      warns.push(`人數 ${s.length} 超過範本 ${tinfo().capacity} 列，下載時會自動增加列數並更新合計公式`);
     }
     $('op-warnings').innerHTML = warns.map((w) => `<div class="warn">⚠ ${w}</div>`).join('');
 
     const q = $('op-filter').value.trim();
     const rows = q ? s.filter((x) => `${x.unit} ${x.card} ${x.name}`.includes(q)) : s;
     // 與下載的名冊相同：年｜月｜單位｜卡號｜姓名｜金額｜備註；紅字列同 Excel；滑鼠停留可看教學日與說明
-    const ti = state.template.info;
+    const ti = tinfo();
     $('op-result').innerHTML = rows.length ? rows.map((x) => {
       const notes = [x.days.length ? O.formatDays(x.days) : (x.daysText || '')];
       if (x.highlight) notes.push(x.amount === null ? '日期無法辨識' : !x.card ? '無法辨識／缺卡號' : `系統無紀錄 +${money(x.appExtra)}`);
@@ -317,14 +354,18 @@
     const btn = $('op-download');
     btn.disabled = true;
     try {
-      const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(state.template.buffer.slice(0));
+      // 有範本填範本；沒有範本產生同格式的空白名冊
+      let wb;
+      if (state.template) { wb = new ExcelJS.Workbook(); await wb.xlsx.load(state.template.buffer.slice(0)); } else {
+        const ti = tinfo();
+        wb = Fill.blankTemplate(ExcelJS, { title: '教學門診指導費支領名冊', rocYear: ti.rocYear, month: ti.month, withDays: false });
+      }
       Fill.fillTemplate(wb, state.summary);
       const out = await wb.xlsx.writeBuffer();
       const url = URL.createObjectURL(new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
       const a = document.createElement('a');
       a.href = url;
-      a.download = state.template.name.replace(/\.xlsx$/i, '') + '_已填寫.xlsx';
+      a.download = state.template ? `${state.template.name.replace(/\.xlsx$/i, '')}_已填寫.xlsx` : `教學門診名冊_${tinfo().rocYear}${String(tinfo().month).padStart(2, '0')}.xlsx`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err) {

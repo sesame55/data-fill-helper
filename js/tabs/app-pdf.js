@@ -149,6 +149,10 @@
       if (teacher.length < 2) teacher = han((await P.chi7.recognize(canvas, { rectangle: below })).data.text);
       items.push({ code, raw, teacher, box: [b.x0, b.y0, b.x1, b.y1] });
     }
+    // 依門診表的時間順序排列：先分週（同一橫列帶），再依星期／時段（由左到右）
+    const bandH = Math.max(40, ...items.map((x) => x.box[3] - x.box[1])) * 2.5;
+    items.sort((a, b) => (Math.abs(a.box[1] - b.box[1]) < bandH ? a.box[0] - b.box[0] : a.box[1] - b.box[1]));
+    items.forEach((x, i) => { x.seq = i; });
     // 有效代碼的「種類數」（印章等雜訊常被重複讀成同一個代碼）
     return { items, valid: new Set(items.filter((x) => VALID_CODE.test(x.code)).map((x) => x.code)).size };
   }
@@ -254,7 +258,7 @@
       if (unit) pg.unit = unit;
       if (teacher.length >= 2 || dateText) {
         pg.rows.push({ id: ++seq, ocrText: `${dateText} ${teacher}`, ocrDate: dateText,
-          date: A.fixDate(dateText, getYm() || '2000-01'), teacher, student: '', include: true, card: '' });
+          date: A.fixDate(dateText, getYm() || '2000-01'), teacher, student: '', include: true, card: '', order: pg.key * 1000 });
       } else pg.unreadable = (pg.unreadable || 0) + 1;
     }
 
@@ -335,7 +339,7 @@
         (students.length ? students : ['']).forEach((st) => pg.rows.push({
           id: ++seq, ocrText: `${dateText} ${teacher} ${st}`.trim(), ocrDate: dateText,
           date: A.fixDate(dateText, getYm() || '2000-01'), teacher, student: st, include: true, card: '',
-          word, teacherDone, marked, order: pg.page * 1000 + pg.rows.length,
+          word, teacherDone, marked, order: pg.key * 1000 + pg.rows.length,   // 彙整表出現順序（跨檔案依匯入順序）
         }));
       }
       pg.hasMarks = pg.rows.some((x) => x.marked);

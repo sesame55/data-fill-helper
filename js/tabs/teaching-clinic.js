@@ -50,8 +50,26 @@
         setBusy(f.name, false);
       }
     }
+    guessMonth(files);
     reparse();
   }
+
+  /** 沒有範本時，從檔名猜月份：「202609」或民國「11509」；多個檔案時取出現最多的月份 */
+  function guessMonth(files) {
+    const el = $('ip-month');
+    if (state.template) { el.value = targetYm(); return; }
+    if (el.value) return;
+    const cnt = {};
+    files.forEach((f) => {
+      const w = f.name.match(/20(\d{2})(0[1-9]|1[0-2])/);
+      const r = f.name.match(/1(\d{2})(0[1-9]|1[0-2])(?!\d)/);
+      const ym = w ? `20${w[1]}-${w[2]}` : r ? `${Number(`1${r[1]}`) + 1911}-${r[2]}` : '';
+      if (ym) cnt[ym] = (cnt[ym] || 0) + 1;
+    });
+    const best = Object.entries(cnt).sort((x, y) => y[1] - x[1] || y[0].localeCompare(x[0]))[0];
+    if (best) el.value = best[0];
+  }
+
 
   async function loadXlsx(file) {
     const buffer = await file.arrayBuffer();
@@ -106,15 +124,23 @@
 
   // ---------- 解析 / 計算 ----------
   function reparse() {
-    const t = state.template?.info;
-    state.parsed = state.raw && t ? Calc.parseRaw(state.raw.rows, t.rocYear + 1911, t.month) : null;
+    const ym = targetYm();
+    state.parsed = state.raw && ym ? Calc.parseRaw(state.raw.rows, Number(ym.slice(0, 4)), Number(ym.slice(5, 7))) : null;
+    // 沒有申請單時的排序依據：rawdata 原始順序
+    if (state.parsed) state.parsed.records.forEach((r, i) => { r.order = 5e8 + i; });
     renderStatus();
     renderPages();
     if (app.hasData()) app.rematch(); else recalc();
   }
 
   // ---------- 申請單（PDF）：計費基準 ----------
-  const targetYm = () => (state.template ? `${state.template.info.rocYear + 1911}-${String(state.template.info.month).padStart(2, '0')}` : '');
+  const targetYm = () => (state.template ? `${state.template.info.rocYear + 1911}-${String(state.template.info.month).padStart(2, '0')}` : ($('ip-month').value || ''));
+  /** 名冊資訊：有範本用範本；沒有範本用月份欄 */
+  const tinfo = () => {
+    if (state.template) return state.template.info;
+    const ym = targetYm();
+    return { rocYear: Number(ym.slice(0, 4)) - 1911, month: Number(ym.slice(5, 7)), capacity: Infinity };
+  };
   const app = AppPdf.create({
     root: $('ip-app'),
     getRawRows: () => state.rawRows || [],
@@ -151,7 +177,7 @@
     if (!state.parsed) { $('ip-result-step').hidden = true; return; }
     const manual = state.pages
       .filter((p) => p.include && p.teacher.trim() && parsePageDate(p.date)
-        && Number(parsePageDate(p.date).slice(5, 7)) === state.template.info.month)
+        && Number(parsePageDate(p.date).slice(5, 7)) === tinfo().month)
       .map((p) => ({
         card: Calc.normCard(p.card), name: p.teacher.trim(), unit: p.unit.trim(),
         date: parsePageDate(p.date), source: '手寫',
@@ -174,6 +200,12 @@
       const claimed = new Set(app.matched().filter((m) => m.match).map((m) => `${m.match.tCard}|${m.match.date}`));
       state.unclaimed = state.parsed.records.filter((r) => !claimed.has(`${r.card}|${r.date}`));
     } else state.unclaimed = [];
+    // 排序：依彙整表（申請單）出現順序，不依筆畫；一般內科放最後
+    const key = (x) => x.card || `name:${x.name}`;
+    const first = new Map();
+    base.forEach((r) => { const k = key(r); const o = r.order ?? 9e8; if (!first.has(k) || o < first.get(k)) first.set(k, o); });
+    const rank = (x) => (Calc.LAST_UNITS.includes(x.unit) ? 1e12 : 0) + (first.get(key(x)) ?? 9e8);
+    state.summary.sort((a, b) => rank(a) - rank(b));
     // 日期無法辨識的申請單列：紅字、金額空白（下載後人工核對）
     if (app.hasData()) {
       app.undated().forEach((u) => state.summary.push({
@@ -191,7 +223,7 @@
     const item = (ok, label, detail) =>
       `<div class="status-item ${ok ? 'ok' : ''}"><span class="dot"></span><b>${label}</b><span class="muted small">${detail}</span></div>`;
     $('ip-status').innerHTML = [
-      item(!!t, '範本', t ? `${esc(t.name)}・${t.info.rocYear} 年 ${t.info.month} 月・可填 ${t.info.capacity} 列` : '尚未匯入'),
+      item(!!t, '範本', t ? `${esc(t.name)}・${t.info.rocYear} 年 ${t.info.month} 月・可填 ${t.info.capacity} 列` : '（選填）未匯入時，依「月份」產生同格式的空白名冊'),
       item(!!r, 'rawdata', r ? `${esc(r.name)}・${money(r.rows.length)} 筆${p ? `・本月已評核 ${money(p.records.length)} 筆` : ''}` : '尚未匯入'),
       item(pdfFiles.length > 0, '手寫紀錄', pdfFiles.length ? `${pdfFiles.length} 個檔案・${state.pages.length} 頁` : '（選填）'),
       state.busy.length ? `<div class="status-item busy"><span class="dot"></span>讀取中：${esc(state.busy.join('、'))}</div>` : '',
@@ -283,15 +315,16 @@
     const noCard = s.filter((x) => !x.card);
     const badPages = state.pages.filter((p) => p.include && pageProblem(p) && !pageProblem(p).startsWith('缺卡號'));
     if (badPages.length) warns.push(`有 ${badPages.length} 頁手寫紀錄資料不完整，尚未算入`);
-    if (s.length > state.template.info.capacity) {
-      warns.push(`人數 ${s.length} 超過範本 ${state.template.info.capacity} 列，下載時會自動增加列數並更新合計公式`);
+    if (!state.template) warns.push('未匯入範本：下載時會產生同格式的空白名冊（年、月、單位、卡號、姓名、金額、備註、教學日）。');
+    else if (s.length > tinfo().capacity) {
+      warns.push(`人數 ${s.length} 超過範本 ${tinfo().capacity} 列，下載時會自動增加列數並更新合計公式`);
     }
     $('ip-warnings').innerHTML = warns.map((w) => `<div class="warn">⚠ ${w}</div>`).join('');
 
     const q = $('ip-filter').value.trim();
     const rows = q ? s.filter((x) => `${x.unit} ${x.card} ${x.name}`.includes(q)) : s;
     // 與下載的名冊相同：年｜月｜單位｜卡號｜姓名｜金額｜備註｜教學日；紅字列同 Excel；滑鼠停留可看說明
-    const ti = state.template.info;
+    const ti = tinfo();
     $('ip-result').innerHTML = rows.length ? rows.map((x) => {
       const why = [x.highlight ? (x.amount === null ? '日期無法辨識' : !x.card ? '無法辨識／缺卡號' : `系統無紀錄 +${money(x.appExtra)}`) : '', `${x.weeks.length} 週`].filter(Boolean).join('，');
       return `<tr class="${x.highlight ? 'row-red' : ''}" title="${esc(why)}">
@@ -304,6 +337,7 @@
 
   $('ip-filter').addEventListener('input', () => state.parsed && renderResult());
   $('ip-week-start').addEventListener('change', recalc);
+  $('ip-month').addEventListener('change', reparse);
 
   // ---------- 下載比對後的 rawdata ----------
   $('ip-raw-download').addEventListener('click', async () => {
@@ -319,15 +353,19 @@
     const btn = $('ip-download');
     btn.disabled = true;
     try {
-      const wb = new ExcelJS.Workbook();
-      await wb.xlsx.load(state.template.buffer.slice(0));
+      // 有範本填範本；沒有範本產生同格式的空白名冊
+      let wb;
+      if (state.template) { wb = new ExcelJS.Workbook(); await wb.xlsx.load(state.template.buffer.slice(0)); } else {
+        const ti = tinfo();
+        wb = Fill.blankTemplate(ExcelJS, { title: '教學住診指導費支領名冊', rocYear: ti.rocYear, month: ti.month, withDays: true });
+      }
       Fill.fillTemplate(wb, state.summary);
       const out = await wb.xlsx.writeBuffer();
       const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = state.template.name.replace(/\.xlsx$/i, '') + '_已填寫.xlsx';
+      a.download = state.template ? `${state.template.name.replace(/\.xlsx$/i, '')}_已填寫.xlsx` : `教學住診名冊_${tinfo().rocYear}${String(tinfo().month).padStart(2, '0')}.xlsx`;
       a.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     } catch (err) {
